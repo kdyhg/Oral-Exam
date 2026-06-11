@@ -1,18 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Dashboard } from "@/components/dashboard";
 import { ExamView } from "@/components/exam-view";
 import { LoginView } from "@/components/login-view";
 import { QuestionChooser } from "@/components/question-chooser";
-import { buildClassProgress } from "@/lib/exam-rules";
-import type { BootstrapData, Exam, Score, Student } from "@/lib/types";
+import { DRAFT_STORAGE_KEY, mergeExams, parseDrafts, type ExamDrafts } from "@/lib/drafts";
+import { buildClassProgress, pickRandomQuestionIds } from "@/lib/exam-rules";
+import type { BootstrapData, Exam, Student } from "@/lib/types";
 
 export function OralExamApp() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [data, setData] = useState<BootstrapData | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [drafts, setDrafts] = useState<ExamDrafts>(readBrowserDrafts);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -33,6 +35,20 @@ export function OralExamApp() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+    } catch {
+      // The active assessment still works when browser storage is unavailable.
+    }
+  }, [drafts]);
+
+  const visibleData = useMemo(() => {
+    if (!data) return null;
+    const exams = mergeExams(data.exams, drafts);
+    return { ...data, exams, progress: buildClassProgress(data.students, exams) };
+  }, [data, drafts]);
 
   async function login(pin: string) {
     setBusy(true);
@@ -56,40 +72,70 @@ export function OralExamApp() {
     setAuthenticated(false);
   }
 
-  async function startExam(selfQuestionId: string) {
-    if (!selectedStudent) return;
-    setBusy(true);
-    setError("");
-    try {
-      const exam = await request<Exam>("/api/exams", {
-        method: "POST",
-        body: JSON.stringify({ studentId: selectedStudent.studentId, selfQuestionId }),
-      });
-      replaceExam(exam);
-    } catch (startError) {
-      setError(message(startError));
-    } finally {
-      setBusy(false);
+  function selectStudent(student: Student) {
+    const saved = data?.exams.find((exam) => exam.studentId === student.studentId);
+    if (saved && !drafts[student.studentId]) {
+      setDrafts((current) => ({ ...current, [student.studentId]: structuredClone(saved) }));
     }
+    setError("");
+    setSelectedStudent(student);
   }
 
-  async function patchExam(patch: {
-    scores?: Score[];
-    memo?: string;
-    hintQuestionId?: string;
-    status?: "COMPLETED";
-  }) {
-    const exam = activeExam();
-    if (!exam) return;
+  function startExam(selfQuestionId: string) {
+    if (!selectedStudent || !data) return;
+    const randomQuestionIds = pickRandomQuestionIds(
+      data.questions.filter((question) => question.type === "RANDOM").map((question) => question.id),
+    );
+    const now = new Date().toISOString();
+    const draft: Exam = {
+      examId: crypto.randomUUID(),
+      studentId: selectedStudent.studentId,
+      className: selectedStudent.className,
+      number: selectedStudent.number,
+      name: selectedStudent.name,
+      selfQuestionId,
+      randomQuestionIds,
+      startedAt: now,
+      endedAt: null,
+      hintQuestionId: null,
+      hintAt: null,
+      scores: [
+        { questionId: selfQuestionId, correct: null },
+        { questionId: randomQuestionIds[0], correct: null },
+        { questionId: randomQuestionIds[1], correct: null },
+      ],
+      fluency: null,
+      memo: "",
+      status: "IN_PROGRESS",
+      updatedAt: now,
+    };
+    updateDraft(draft);
+  }
+
+  function updateDraft(exam: Exam) {
+    setDrafts((current) => ({ ...current, [exam.studentId]: exam }));
+  }
+
+  async function submitDraft(exam: Exam) {
     setBusy(true);
     setError("");
     try {
-      replaceExam(
-        await request<Exam>(`/api/exams/${exam.examId}`, {
-          method: "PATCH",
-          body: JSON.stringify(patch),
-        }),
-      );
+      const saved = await request<Exam>("/api/exams", {
+        method: "POST",
+        body: JSON.stringify(exam),
+      });
+      setData((current) => {
+        if (!current) return current;
+        const exams = current.exams.some((item) => item.studentId === saved.studentId)
+          ? current.exams.map((item) => (item.studentId === saved.studentId ? saved : item))
+          : [...current.exams, saved];
+        return { ...current, exams, progress: buildClassProgress(current.students, exams) };
+      });
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[saved.studentId];
+        return next;
+      });
     } catch (saveError) {
       setError(message(saveError));
     } finally {
@@ -98,21 +144,13 @@ export function OralExamApp() {
   }
 
   function activeExam(): Exam | undefined {
-    return data?.exams.find((exam) => exam.studentId === selectedStudent?.studentId);
-  }
-
-  function replaceExam(nextExam: Exam) {
-    setData((current) => {
-      if (!current) return current;
-      const exams = current.exams.some((exam) => exam.examId === nextExam.examId)
-        ? current.exams.map((exam) => (exam.examId === nextExam.examId ? nextExam : exam))
-        : [...current.exams, nextExam];
-      return { ...current, exams, progress: buildClassProgress(current.students, exams) };
-    });
+    if (!selectedStudent) return undefined;
+    return drafts[selectedStudent.studentId] ??
+      data?.exams.find((exam) => exam.studentId === selectedStudent.studentId);
   }
 
   if (authenticated === null) return <main className="loading">평가 데이터를 확인하고 있습니다...</main>;
-  if (!authenticated || !data) return <LoginView busy={busy} error={error} onLogin={login} />;
+  if (!authenticated || !visibleData) return <LoginView busy={busy} error={error} onLogin={login} />;
 
   const exam = activeExam();
   if (selectedStudent && exam) {
@@ -120,15 +158,16 @@ export function OralExamApp() {
       <ExamView
         key={exam.examId}
         exam={exam}
-        questions={data.questions}
-        settings={data.settings}
+        questions={visibleData.questions}
+        settings={visibleData.settings}
         busy={busy}
         error={error}
         onBack={() => {
           setError("");
           setSelectedStudent(null);
         }}
-        onPatch={patchExam}
+        onChange={updateDraft}
+        onSubmit={submitDraft}
       />
     );
   }
@@ -136,14 +175,14 @@ export function OralExamApp() {
     return (
       <QuestionChooser
         student={selectedStudent}
-        questions={data.questions.filter((question) => question.type === "SELF")}
-        busy={busy}
+        questions={visibleData.questions.filter((question) => question.type === "SELF")}
+        busy={false}
         onBack={() => setSelectedStudent(null)}
         onChoose={startExam}
       />
     );
   }
-  return <Dashboard data={data} onSelectStudent={setSelectedStudent} onLogout={logout} />;
+  return <Dashboard data={visibleData} onSelectStudent={selectStudent} onLogout={logout} />;
 }
 
 async function request<T = unknown>(url: string, init: RequestInit): Promise<T> {
@@ -166,4 +205,13 @@ async function fetchBootstrap(): Promise<BootstrapData | null> {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다.";
+}
+
+function readBrowserDrafts(): ExamDrafts {
+  if (typeof window === "undefined") return {};
+  try {
+    return parseDrafts(window.localStorage.getItem(DRAFT_STORAGE_KEY));
+  } catch {
+    return {};
+  }
 }

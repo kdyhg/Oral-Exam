@@ -16,16 +16,19 @@ export function pickRandomQuestionIds(
   return [first, pool[secondIndex]];
 }
 
-export function areScoresComplete(scores: Score[]): boolean {
+export function areScoresComplete(scores: Score[], fluency: Mark): boolean {
   return (
     scores.length === 3 &&
-    scores.every(
-      (score) =>
-        isMark(score.correct) &&
-        isMark(score.fluency) &&
-        Boolean(score.questionId),
-    )
+    scores.every((score) => isMark(score.correct) && Boolean(score.questionId)) &&
+    isMark(fluency)
   );
+}
+
+export function deriveStudentFluency(values: Mark[]): Mark {
+  const recorded = values.filter(isMark);
+  if (recorded.length === 0) return null;
+  if (recorded.includes("X")) return "X";
+  return recorded.length === values.length ? "O" : null;
 }
 
 export function applyHint(exam: Exam, questionId: string, usedAt: string): Exam {

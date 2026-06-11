@@ -2,12 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { google, type sheets_v4 } from "googleapis";
 
-import { applyHint, areScoresComplete, buildClassProgress, pickRandomQuestionIds } from "@/lib/exam-rules";
+import { areScoresComplete, buildClassProgress, deriveStudentFluency, isMark } from "@/lib/exam-rules";
 import type {
   AppSettings,
   BootstrapData,
   Exam,
-  ExamStatus,
   Mark,
   Question,
   Score,
@@ -20,14 +19,8 @@ const EXAMS_SHEET = "평가기록";
 const SETTINGS_SHEET = "설정";
 const DEFAULT_SETTINGS: AppSettings = { durationSeconds: 360, warningSeconds: 60 };
 
-type ExamPatch = {
-  scores?: Score[];
-  memo?: string;
-  hintQuestionId?: string;
-  status?: ExamStatus;
-};
-
 type ExamRow = { exam: Exam; rowNumber: number };
+type ExamSheetSchema = "legacy" | "current";
 
 function requiredEnv(
   name: "GOOGLE_SHEET_ID" | "GOOGLE_SERVICE_ACCOUNT_EMAIL" | "GOOGLE_PRIVATE_KEY",
@@ -59,12 +52,13 @@ function mark(row: unknown[], index: number): Mark {
   return value === "O" || value === "X" ? value : null;
 }
 
-function parseExam(row: unknown[]): Exam {
+function parseExam(row: unknown[], schema: ExamSheetSchema): Exam {
   const questionIds = [text(row, 5), text(row, 6), text(row, 7)] as [
     string,
     string,
     string,
   ];
+  const legacy = schema === "legacy";
   return {
     examId: text(row, 0),
     studentId: text(row, 1),
@@ -78,17 +72,45 @@ function parseExam(row: unknown[]): Exam {
     hintQuestionId: text(row, 10) || null,
     hintAt: text(row, 11) || null,
     scores: [
-      { questionId: questionIds[0], correct: mark(row, 12), fluency: mark(row, 13) },
-      { questionId: questionIds[1], correct: mark(row, 14), fluency: mark(row, 15) },
-      { questionId: questionIds[2], correct: mark(row, 16), fluency: mark(row, 17) },
+      { questionId: questionIds[0], correct: mark(row, 12) },
+      { questionId: questionIds[1], correct: mark(row, legacy ? 14 : 13) },
+      { questionId: questionIds[2], correct: mark(row, legacy ? 16 : 14) },
     ],
-    memo: text(row, 18),
-    status: text(row, 19) === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS",
-    updatedAt: text(row, 20),
+    fluency: legacy
+      ? deriveStudentFluency([mark(row, 13), mark(row, 15), mark(row, 17)])
+      : mark(row, 15),
+    memo: text(row, legacy ? 18 : 16),
+    status: text(row, legacy ? 19 : 17) === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS",
+    updatedAt: text(row, legacy ? 20 : 18),
   };
 }
 
-function serializeExam(exam: Exam): (string | number)[] {
+function serializeExam(exam: Exam, schema: ExamSheetSchema): (string | number)[] {
+  if (schema === "legacy") {
+    return [
+      exam.examId,
+      exam.studentId,
+      exam.className,
+      exam.number,
+      exam.name,
+      exam.selfQuestionId,
+      exam.randomQuestionIds[0],
+      exam.randomQuestionIds[1],
+      exam.startedAt,
+      exam.endedAt ?? "",
+      exam.hintQuestionId ?? "",
+      exam.hintAt ?? "",
+      exam.scores[0].correct ?? "",
+      exam.fluency ?? "",
+      exam.scores[1].correct ?? "",
+      exam.fluency ?? "",
+      exam.scores[2].correct ?? "",
+      exam.fluency ?? "",
+      exam.memo,
+      exam.status,
+      exam.updatedAt,
+    ];
+  }
   return [
     exam.examId,
     exam.studentId,
@@ -103,11 +125,9 @@ function serializeExam(exam: Exam): (string | number)[] {
     exam.hintQuestionId ?? "",
     exam.hintAt ?? "",
     exam.scores[0].correct ?? "",
-    exam.scores[0].fluency ?? "",
     exam.scores[1].correct ?? "",
-    exam.scores[1].fluency ?? "",
     exam.scores[2].correct ?? "",
-    exam.scores[2].fluency ?? "",
+    exam.fluency ?? "",
     exam.memo,
     exam.status,
     exam.updatedAt,
@@ -145,11 +165,18 @@ async function readQuestions(): Promise<Question[]> {
     }));
 }
 
-async function readExamRows(): Promise<ExamRow[]> {
-  const rows = await readRange(`${EXAMS_SHEET}!A2:U`);
-  return rows
-    .map((row, index) => ({ exam: parseExam(row), rowNumber: index + 2 }))
-    .filter(({ exam }) => exam.examId);
+async function readExamRows(): Promise<{ rows: ExamRow[]; schema: ExamSheetSchema }> {
+  const values = await readRange(`${EXAMS_SHEET}!A1:U`);
+  const schema: ExamSheetSchema = text(values[0] ?? [], 13).includes("유창성")
+    ? "legacy"
+    : "current";
+  return {
+    schema,
+    rows: values
+      .slice(1)
+      .map((row, index) => ({ exam: parseExam(row, schema), rowNumber: index + 2 }))
+      .filter(({ exam }) => exam.examId),
+  };
 }
 
 async function readSettings(): Promise<AppSettings> {
@@ -168,7 +195,7 @@ export async function getBootstrapData(): Promise<BootstrapData> {
     readExamRows(),
     readSettings(),
   ]);
-  const exams = examRows.map(({ exam }) => exam);
+  const exams = examRows.rows.map(({ exam }) => exam);
   return {
     students,
     questions,
@@ -178,97 +205,85 @@ export async function getBootstrapData(): Promise<BootstrapData> {
   };
 }
 
-export async function createExam(
-  studentId: string,
-  selfQuestionId: string,
-): Promise<Exam> {
+export async function submitExam(input: Exam): Promise<Exam> {
   const [students, questions, examRows] = await Promise.all([
     readStudents(),
     readQuestions(),
     readExamRows(),
   ]);
-  const existing = examRows.find(({ exam }) => exam.studentId === studentId)?.exam;
-  if (existing) return existing;
-
-  const student = students.find((item) => item.studentId === studentId && item.active);
+  const student = students.find((item) => item.studentId === input.studentId && item.active);
   if (!student) throw new Error("활성 학생을 찾을 수 없습니다.");
 
   const selfQuestion = questions.find(
-    (question) => question.id === selfQuestionId && question.type === "SELF",
+    (question) => question.id === input.selfQuestionId && question.type === "SELF",
   );
   if (!selfQuestion) throw new Error("올바른 자기선택형 문항을 선택해 주세요.");
 
-  const randomQuestionIds = pickRandomQuestionIds(
+  const randomIds = new Set(
     questions.filter((question) => question.type === "RANDOM").map((question) => question.id),
   );
+  if (
+    input.randomQuestionIds[0] === input.randomQuestionIds[1] ||
+    !input.randomQuestionIds.every((id) => randomIds.has(id))
+  ) {
+    throw new Error("무작위형 문항 배정을 확인해 주세요.");
+  }
+  const assignedIds = [
+    input.selfQuestionId,
+    input.randomQuestionIds[0],
+    input.randomQuestionIds[1],
+  ];
+  if (
+    input.scores.length !== 3 ||
+    input.scores.some((score, index) => score.questionId !== assignedIds[index]) ||
+    !areScoresComplete(input.scores, input.fluency)
+  ) {
+    throw new Error("정답 여부 3개와 학생별 유창성을 모두 선택해 주세요.");
+  }
+  if (input.hintQuestionId && !assignedIds.includes(input.hintQuestionId)) {
+    throw new Error("배정된 문항에만 Hint를 사용할 수 있습니다.");
+  }
+
+  const existing = examRows.rows.find(({ exam }) => exam.studentId === input.studentId);
   const now = new Date().toISOString();
   const exam: Exam = {
-    examId: randomUUID(),
+    examId: existing?.exam.examId ?? randomUUID(),
     studentId: student.studentId,
     className: student.className,
     number: student.number,
     name: student.name,
-    selfQuestionId,
-    randomQuestionIds,
-    startedAt: now,
-    endedAt: null,
-    hintQuestionId: null,
-    hintAt: null,
-    scores: [
-      { questionId: selfQuestionId, correct: null, fluency: null },
-      { questionId: randomQuestionIds[0], correct: null, fluency: null },
-      { questionId: randomQuestionIds[1], correct: null, fluency: null },
-    ],
-    memo: "",
-    status: "IN_PROGRESS",
+    selfQuestionId: input.selfQuestionId,
+    randomQuestionIds: input.randomQuestionIds,
+    startedAt: Number.isNaN(Date.parse(input.startedAt)) ? now : input.startedAt,
+    endedAt: now,
+    hintQuestionId: input.hintQuestionId,
+    hintAt: input.hintQuestionId && input.hintAt ? input.hintAt : null,
+    scores: input.scores.map((score) => ({
+      questionId: score.questionId,
+      correct: isMark(score.correct) ? score.correct : null,
+    })) as [Score, Score, Score],
+    fluency: input.fluency,
+    memo: input.memo.slice(0, 1000),
+    status: "COMPLETED",
     updatedAt: now,
   };
 
   const { sheets, spreadsheetId } = getClient();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${EXAMS_SHEET}!A:U`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [serializeExam(exam)] },
-  });
-  return exam;
-}
-
-export async function updateExam(examId: string, patch: ExamPatch): Promise<Exam> {
-  const examRows = await readExamRows();
-  const match = examRows.find(({ exam }) => exam.examId === examId);
-  if (!match) throw new Error("평가 기록을 찾을 수 없습니다.");
-
-  const exam = structuredClone(match.exam);
-  if (patch.scores) {
-    if (
-      patch.scores.length !== 3 ||
-      patch.scores.some((score, index) => score.questionId !== exam.scores[index].questionId)
-    ) {
-      throw new Error("배정된 문항과 평가 항목이 일치하지 않습니다.");
-    }
-    exam.scores = patch.scores as [Score, Score, Score];
+  if (existing) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${EXAMS_SHEET}!A${existing.rowNumber}:${examRows.schema === "legacy" ? "U" : "S"}${existing.rowNumber}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [serializeExam(exam, examRows.schema)] },
+    });
+  } else {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${EXAMS_SHEET}!A:${examRows.schema === "legacy" ? "U" : "S"}`,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [serializeExam(exam, examRows.schema)] },
+    });
   }
-  if (typeof patch.memo === "string") exam.memo = patch.memo.slice(0, 1000);
-  if (patch.hintQuestionId) {
-    Object.assign(exam, applyHint(exam, patch.hintQuestionId, new Date().toISOString()));
-  }
-  if (patch.status === "COMPLETED") {
-    if (!areScoresComplete(exam.scores)) {
-      throw new Error("정답 여부와 유창성을 모두 선택해 주세요.");
-    }
-    exam.status = "COMPLETED";
-    exam.endedAt ??= new Date().toISOString();
-  }
-  exam.updatedAt = new Date().toISOString();
-
-  const { sheets, spreadsheetId } = getClient();
-  await sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range: `${EXAMS_SHEET}!A${match.rowNumber}:U${match.rowNumber}`,
-    valueInputOption: "RAW",
-    requestBody: { values: [serializeExam(exam)] },
-  });
   return exam;
 }

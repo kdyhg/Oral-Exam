@@ -17,7 +17,7 @@ export function QuestionCard({
   score: Score;
   hintQuestionId: string | null;
   busy: boolean;
-  onMark: (index: number, field: "correct" | "fluency", value: Exclude<Mark, null>) => void;
+  onMark: (index: number, value: Exclude<Mark, null>) => void;
   onHint: (questionId: string) => void;
 }) {
   const usedHere = hintQuestionId === question.id;
@@ -40,37 +40,33 @@ export function QuestionCard({
         </button>
       </div>
       <p className="question-text"><MathText>{question.prompt}</MathText></p>
-      <div className="score-grid">
-        <ScoreButtons
+      <div className="question-score">
+        <MarkButtons
           label="정답 여부"
           value={score.correct}
           disabled={busy}
-          onChange={(value) => onMark(index, "correct", value)}
-        />
-        <ScoreButtons
-          label="유창성"
-          value={score.fluency}
-          disabled={busy}
-          onChange={(value) => onMark(index, "fluency", value)}
+          onChange={(value) => onMark(index, value)}
         />
       </div>
     </article>
   );
 }
 
-function ScoreButtons({
+export function MarkButtons({
   label,
   value,
   disabled,
   onChange,
+  large = false,
 }: {
   label: string;
   value: Mark;
   disabled: boolean;
   onChange: (value: Exclude<Mark, null>) => void;
+  large?: boolean;
 }) {
   return (
-    <div className="score-group">
+    <div className={`score-group ${large ? "large" : ""}`}>
       <span>{label}</span>
       <button
         className={`mark o ${value === "O" ? "selected" : ""}`}

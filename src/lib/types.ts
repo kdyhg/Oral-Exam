@@ -20,7 +20,6 @@ export interface Question {
 export interface Score {
   questionId: string;
   correct: Mark;
-  fluency: Mark;
 }
 
 export interface Exam {
@@ -36,6 +35,7 @@ export interface Exam {
   hintQuestionId: string | null;
   hintAt: string | null;
   scores: [Score, Score, Score];
+  fluency: Mark;
   memo: string;
   status: ExamStatus;
   updatedAt: string;

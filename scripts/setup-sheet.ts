@@ -4,6 +4,9 @@ import { loadEnvFile } from "node:process";
 import ExcelJS from "exceljs";
 import { google, type sheets_v4 } from "googleapis";
 
+import { deriveStudentFluency } from "../src/lib/exam-rules";
+import type { Mark } from "../src/lib/types";
+
 const TARGET_SHEETS = ["학생명렬", "문항목록", "평가기록", "진행현황", "설정"] as const;
 
 const QUESTIONS = [
@@ -107,15 +110,37 @@ const EXAM_HEADERS = [
   "Hint문항",
   "Hint시각",
   "문항1_정답",
-  "문항1_유창성",
   "문항2_정답",
-  "문항2_유창성",
   "문항3_정답",
-  "문항3_유창성",
+  "학생_유창성",
   "교사메모",
   "상태",
   "수정시각",
 ];
+
+function mark(value: unknown): "O" | "X" | "" {
+  return value === "O" || value === "X" ? value : "";
+}
+
+function legacyFluency(row: unknown[]): "O" | "X" | "" {
+  return deriveStudentFluency(
+    [mark(row[13]), mark(row[15]), mark(row[17])].map((value) => value || null) as Mark[],
+  ) ?? "";
+}
+
+function migrateLegacyExamRows(rows: unknown[][]): (string | number | boolean)[][] {
+  return rows
+    .filter((row) => row[0])
+    .map((row) => [
+      ...row.slice(0, 13),
+      row[14] ?? "",
+      row[16] ?? "",
+      legacyFluency(row),
+      row[18] ?? "",
+      row[19] ?? "",
+      row[20] ?? "",
+    ] as (string | number | boolean)[]);
+}
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -224,7 +249,7 @@ async function formatSheets(
       },
       {
         updateDimensionProperties: {
-          range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 21 },
+          range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 19 },
           properties: { pixelSize: 130 },
           fields: "pixelSize",
         },
@@ -255,7 +280,12 @@ async function formatSheets(
     requests.push(
       {
         setDataValidation: {
-          range: { sheetId: examSheetId, startRowIndex: 1, endRowIndex: 1000, startColumnIndex: 12, endColumnIndex: 18 },
+          range: { sheetId: examSheetId, startRowIndex: 1, endRowIndex: 1000, startColumnIndex: 12, endColumnIndex: 21 },
+        },
+      },
+      {
+        setDataValidation: {
+          range: { sheetId: examSheetId, startRowIndex: 1, endRowIndex: 1000, startColumnIndex: 12, endColumnIndex: 16 },
           rule: {
             condition: { type: "ONE_OF_LIST", values: [{ userEnteredValue: "O" }, { userEnteredValue: "X" }] },
             strict: true,
@@ -265,7 +295,7 @@ async function formatSheets(
       },
       {
         setDataValidation: {
-          range: { sheetId: examSheetId, startRowIndex: 1, endRowIndex: 1000, startColumnIndex: 19, endColumnIndex: 20 },
+          range: { sheetId: examSheetId, startRowIndex: 1, endRowIndex: 1000, startColumnIndex: 17, endColumnIndex: 18 },
           rule: {
             condition: {
               type: "ONE_OF_LIST",
@@ -278,7 +308,7 @@ async function formatSheets(
       },
       {
         updateDimensionProperties: {
-          range: { sheetId: examSheetId, dimension: "COLUMNS", startIndex: 18, endIndex: 19 },
+          range: { sheetId: examSheetId, dimension: "COLUMNS", startIndex: 16, endIndex: 17 },
           properties: { pixelSize: 280 },
           fields: "pixelSize",
         },
@@ -322,14 +352,19 @@ async function main(): Promise<void> {
     ["warningSeconds", 60, "종료 전 경고 시간(초)"],
   ]);
 
-  const examValues = await sheets.spreadsheets.values.get({
+  const examValuesResponse = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: "평가기록!A1:U2",
+    range: "평가기록!A1:U",
   });
-  if (!examValues.data.values?.length) {
+  const examValues = examValuesResponse.data.values ?? [];
+  const legacySheet = String(examValues[0]?.[13] ?? "").includes("유창성");
+  if (!examValues.length || legacySheet) {
+    const migratedRows = legacySheet ? migrateLegacyExamRows(examValues.slice(1)) : [];
+    await replaceValues(sheets, spreadsheetId, "평가기록", [EXAM_HEADERS, ...migratedRows]);
+  } else {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: "평가기록!A1",
+      range: "평가기록!A1:S1",
       valueInputOption: "RAW",
       requestBody: { values: [EXAM_HEADERS] },
     });
@@ -341,11 +376,11 @@ async function main(): Promise<void> {
     return [
       className,
       `=COUNTIF('학생명렬'!B:B,A${row})`,
-      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!T:T,"COMPLETED")`,
-      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!T:T,"IN_PROGRESS")`,
+      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!R:R,"COMPLETED")`,
+      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!R:R,"IN_PROGRESS")`,
       `=B${row}-C${row}-D${row}`,
-      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!M:M,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!O:O,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!Q:Q,"O")`,
-      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!N:N,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!P:P,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!R:R,"O")`,
+      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!M:M,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!N:N,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!O:O,"O")`,
+      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!P:P,"O")`,
       `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!K:K,"<>")`,
     ];
   });

@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { QuestionCard } from "@/components/question-card";
-import { areScoresComplete } from "@/lib/exam-rules";
-import type { AppSettings, Exam, Mark, Question, Score } from "@/lib/types";
+import { MarkButtons, QuestionCard } from "@/components/question-card";
+import { applyHint, areScoresComplete } from "@/lib/exam-rules";
+import type { AppSettings, Exam, Mark, Question } from "@/lib/types";
 
 export function ExamView({
   exam,
@@ -13,7 +13,8 @@ export function ExamView({
   busy,
   error,
   onBack,
-  onPatch,
+  onChange,
+  onSubmit,
 }: {
   exam: Exam;
   questions: Question[];
@@ -21,14 +22,9 @@ export function ExamView({
   busy: boolean;
   error: string;
   onBack: () => void;
-  onPatch: (patch: {
-    scores?: Score[];
-    memo?: string;
-    hintQuestionId?: string;
-    status?: "COMPLETED";
-  }) => Promise<void>;
+  onChange: (exam: Exam) => void;
+  onSubmit: (exam: Exam) => Promise<void>;
 }) {
-  const [memo, setMemo] = useState(exam.memo);
   const [remaining, setRemaining] = useState(() => getRemaining(exam.startedAt, settings.durationSeconds));
   const warned = useRef(false);
   const ended = useRef(false);
@@ -59,35 +55,38 @@ export function ExamView({
     .map((score) => questionById.get(score.questionId))
     .filter((question): question is Question => Boolean(question));
 
-  function mark(index: number, field: "correct" | "fluency", value: Exclude<Mark, null>) {
+  function change(patch: Partial<Exam>) {
+    onChange({ ...exam, ...patch, updatedAt: new Date().toISOString() });
+  }
+
+  function mark(index: number, value: Exclude<Mark, null>) {
     const scores = exam.scores.map((score, scoreIndex) =>
-      scoreIndex === index ? { ...score, [field]: value } : score,
-    );
-    void onPatch({ scores });
+      scoreIndex === index ? { ...score, correct: value } : score,
+    ) as Exam["scores"];
+    change({ scores });
   }
 
   function useHint(questionId: string) {
     if (window.confirm("이 문항에 Hint를 사용하시겠습니까? 전체 평가에서 한 번만 사용할 수 있습니다.")) {
-      void onPatch({ hintQuestionId: questionId });
+      change(applyHint(exam, questionId, new Date().toISOString()));
     }
   }
 
   async function complete() {
-    if (!areScoresComplete(exam.scores)) return;
-    if (memo !== exam.memo) await onPatch({ memo });
-    await onPatch({ status: "COMPLETED" });
+    if (!areScoresComplete(exam.scores, exam.fluency)) return;
+    await onSubmit({ ...exam, status: "COMPLETED" });
   }
 
   const timerState = remaining === 0 ? "ended" : remaining <= settings.warningSeconds ? "warning" : "";
 
   return (
-    <main className="shell">
+    <main className="shell exam-shell">
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">f(x)</div>
           <div>
             <h1>대수 수학개념 도슨트</h1>
-            <p>평가 항목은 변경 즉시 Google Sheet에 저장됩니다.</p>
+            <p>평가 중에는 이 기기에만 저장되며, 평가 완료 시 Google Sheet에 한 번 저장됩니다.</p>
           </div>
         </div>
         <button className="button secondary" type="button" onClick={onBack}>학생 목록</button>
@@ -97,7 +96,7 @@ export function ExamView({
         <div>
           <p>{exam.className} · {exam.number}번</p>
           <h2>{exam.name}</h2>
-          <p>{exam.status === "COMPLETED" ? "평가 완료 · 결과 수정 가능" : "평가 진행 중"}</p>
+          <p>{exam.status === "COMPLETED" ? "완료 기록 수정 중 · 저장 전" : "평가 진행 중 · 로컬 초안 저장됨"}</p>
         </div>
         <div className={`timer ${timerState}`} role="timer" aria-label="남은 평가 시간">
           <strong>{formatTime(remaining)}</strong>
@@ -106,7 +105,7 @@ export function ExamView({
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
-      {busy ? <div className="notice info">Google Sheet에 저장 중...</div> : null}
+      {busy ? <div className="notice info">최종 평가 결과를 Google Sheet에 저장하고 있습니다...</div> : null}
 
       <section className="question-list">
         {assignedQuestions.map((question, index) => (
@@ -124,25 +123,32 @@ export function ExamView({
       </section>
 
       <section className="card exam-footer">
-        <div className="field">
+        <div className="fluency-panel">
+          <p className="question-kicker">STUDENT FLUENCY</p>
+          <MarkButtons
+            label="학생별 유창성"
+            value={exam.fluency}
+            disabled={busy}
+            large
+            onChange={(fluency) => change({ fluency })}
+          />
+        </div>
+        <div className="field memo-field">
           <label htmlFor="memo">교사 메모</label>
           <textarea
             id="memo"
             className="textarea"
             maxLength={1000}
             placeholder="관찰 내용이나 후속 확인 사항을 기록하세요."
-            value={memo}
-            onChange={(event) => setMemo(event.target.value)}
+            value={exam.memo}
+            onChange={(event) => change({ memo: event.target.value })}
           />
         </div>
         <div className="footer-actions">
-          <button className="button secondary" type="button" disabled={busy || memo === exam.memo} onClick={() => onPatch({ memo })}>
-            메모 저장
-          </button>
           <button
-            className="button"
+            className="button save-button"
             type="button"
-            disabled={busy || !areScoresComplete(exam.scores)}
+            disabled={busy || !areScoresComplete(exam.scores, exam.fluency)}
             onClick={complete}
           >
             {exam.status === "COMPLETED" ? "평가 결과 저장" : "평가 완료"}
@@ -164,8 +170,7 @@ function formatTime(seconds: number): string {
 
 function beep(frequency: number) {
   try {
-    const AudioContextClass = window.AudioContext;
-    const context = new AudioContextClass();
+    const context = new window.AudioContext();
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     oscillator.frequency.value = frequency;

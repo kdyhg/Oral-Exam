@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { applyHint, areScoresComplete, buildClassProgress, pickRandomQuestionIds } from "./exam-rules";
+import {
+  applyHint,
+  areScoresComplete,
+  buildClassProgress,
+  deriveStudentFluency,
+  pickRandomQuestionIds,
+} from "./exam-rules";
 import type { Exam, Score, Student } from "./types";
 
 describe("pickRandomQuestionIds", () => {
@@ -15,23 +21,36 @@ describe("pickRandomQuestionIds", () => {
 });
 
 describe("areScoresComplete", () => {
-  it("정답 여부와 유창성이 모두 있어야 완료된다", () => {
+  it("문항별 정답 3개와 학생별 유창성이 모두 있어야 완료된다", () => {
     const scores: Score[] = [
-      { questionId: "S1", correct: "O", fluency: "X" },
-      { questionId: "R1", correct: "X", fluency: "O" },
-      { questionId: "R2", correct: "O", fluency: "O" },
+      { questionId: "S1", correct: "O" },
+      { questionId: "R1", correct: "X" },
+      { questionId: "R2", correct: "O" },
     ];
-    expect(areScoresComplete(scores)).toBe(true);
-    expect(areScoresComplete([{ ...scores[0], fluency: null }, ...scores.slice(1)])).toBe(false);
+    expect(areScoresComplete(scores, "O")).toBe(true);
+    expect(areScoresComplete([{ ...scores[0], correct: null }, ...scores.slice(1)], "O")).toBe(false);
+    expect(areScoresComplete(scores, null)).toBe(false);
+  });
+});
+
+describe("deriveStudentFluency", () => {
+  it("기존 문항별 유창성이 모두 O일 때만 O로 옮긴다", () => {
+    expect(deriveStudentFluency(["O", "O", "O"])).toBe("O");
+    expect(deriveStudentFluency(["O", null, "O"])).toBeNull();
+  });
+
+  it("기존 값에 X가 하나라도 있으면 X로 옮기고 전부 비면 비워 둔다", () => {
+    expect(deriveStudentFluency(["O", "X", null])).toBe("X");
+    expect(deriveStudentFluency([null, null, null])).toBeNull();
   });
 });
 
 describe("applyHint", () => {
   const exam = {
     scores: [
-      { questionId: "S1", correct: null, fluency: null },
-      { questionId: "R1", correct: null, fluency: null },
-      { questionId: "R2", correct: null, fluency: null },
+      { questionId: "S1", correct: null },
+      { questionId: "R1", correct: null },
+      { questionId: "R2", correct: null },
     ],
     hintQuestionId: null,
     hintAt: null,
