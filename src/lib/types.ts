@@ -39,6 +39,24 @@ export interface Exam {
   memo: string;
   status: ExamStatus;
   updatedAt: string;
+  revision: number;
+}
+
+export interface ExamDraft {
+  exam: Exam;
+  baseRevision: number;
+  touchedAt: string;
+}
+
+export interface ExamSubmission {
+  exam: Exam;
+  baseRevision: number;
+  forceOverwrite: boolean;
+}
+
+export interface ExamConflict {
+  code: "VERSION_CONFLICT";
+  latestExam: Exam | null;
 }
 
 export interface AppSettings {

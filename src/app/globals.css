@@ -65,6 +65,13 @@ button:disabled {
   margin-bottom: 24px;
 }
 
+.topbar-actions,
+.conflict-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -229,6 +236,26 @@ button:disabled {
 .notice.info {
   color: #1856bd;
   background: #edf4ff;
+}
+
+.notice.conflict-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: #754c08;
+  border: 1px solid #f0cc89;
+  background: #fff9e9;
+}
+
+.conflict-notice strong,
+.conflict-notice span {
+  display: block;
+}
+
+.conflict-notice span {
+  margin-top: 3px;
+  font-weight: 500;
 }
 
 .progress-grid {
@@ -659,6 +686,12 @@ button:disabled {
 
   .topbar {
     align-items: flex-start;
+  }
+
+  .topbar-actions,
+  .conflict-notice,
+  .conflict-actions {
+    display: grid;
   }
 
   .brand p {

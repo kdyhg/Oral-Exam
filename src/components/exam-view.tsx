@@ -4,26 +4,36 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { MarkButtons, QuestionCard } from "@/components/question-card";
 import { applyHint, areScoresComplete } from "@/lib/exam-rules";
-import type { AppSettings, Exam, Mark, Question } from "@/lib/types";
+import type { AppSettings, Exam, ExamConflict, Mark, Question } from "@/lib/types";
 
 export function ExamView({
   exam,
   questions,
   settings,
   busy,
+  dirty,
+  conflict,
   error,
   onBack,
   onChange,
+  onDiscard,
   onSubmit,
+  onUseLatest,
+  onForceSubmit,
 }: {
   exam: Exam;
   questions: Question[];
   settings: AppSettings;
   busy: boolean;
+  dirty: boolean;
+  conflict: ExamConflict | null;
   error: string;
   onBack: () => void;
   onChange: (exam: Exam) => void;
-  onSubmit: (exam: Exam) => Promise<void>;
+  onDiscard?: () => void;
+  onSubmit: (exam: Exam, forceOverwrite?: boolean) => Promise<void>;
+  onUseLatest: () => void;
+  onForceSubmit: () => void;
 }) {
   const [remaining, setRemaining] = useState(() => getRemaining(exam.startedAt, settings.durationSeconds));
   const warned = useRef(false);
@@ -60,6 +70,7 @@ export function ExamView({
   }
 
   function mark(index: number, value: Exclude<Mark, null>) {
+    if (exam.scores[index].correct === value) return;
     const scores = exam.scores.map((score, scoreIndex) =>
       scoreIndex === index ? { ...score, correct: value } : score,
     ) as Exam["scores"];
@@ -96,7 +107,13 @@ export function ExamView({
         <div>
           <p>{exam.className} · {exam.number}번</p>
           <h2>{exam.name}</h2>
-          <p>{exam.status === "COMPLETED" ? "완료 기록 수정 중 · 저장 전" : "평가 진행 중 · 로컬 초안 저장됨"}</p>
+          <p>
+            {exam.status === "COMPLETED"
+              ? dirty
+                ? "완료 기록 수정 중 · 저장 전"
+                : "완료 기록 확인 · 변경 시 로컬 초안 생성"
+              : "평가 진행 중 · 로컬 초안 저장됨"}
+          </p>
         </div>
         <div className={`timer ${timerState}`} role="timer" aria-label="남은 평가 시간">
           <strong>{formatTime(remaining)}</strong>
@@ -106,6 +123,22 @@ export function ExamView({
 
       {error ? <div className="notice error">{error}</div> : null}
       {busy ? <div className="notice info">최종 평가 결과를 Google Sheet에 저장하고 있습니다...</div> : null}
+      {conflict ? (
+        <section className="notice conflict-notice" role="alert">
+          <div>
+            <strong>다른 기기에서 이 학생의 기록이 먼저 저장되었습니다.</strong>
+            <span>최신 기록을 불러오거나, 현재 화면의 결과로 강제 저장할 수 있습니다.</span>
+          </div>
+          <div className="conflict-actions">
+            <button className="button secondary" type="button" disabled={busy} onClick={onUseLatest}>
+              최신 기록 불러오기
+            </button>
+            <button className="button danger" type="button" disabled={busy} onClick={onForceSubmit}>
+              현재 결과 강제 저장
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="question-list">
         {assignedQuestions.map((question, index) => (
@@ -130,7 +163,9 @@ export function ExamView({
             value={exam.fluency}
             disabled={busy}
             large
-            onChange={(fluency) => change({ fluency })}
+            onChange={(fluency) => {
+              if (exam.fluency !== fluency) change({ fluency });
+            }}
           />
         </div>
         <div className="field memo-field">
@@ -145,10 +180,15 @@ export function ExamView({
           />
         </div>
         <div className="footer-actions">
+          {onDiscard ? (
+            <button className="button danger" type="button" disabled={busy} onClick={onDiscard}>
+              {exam.status === "COMPLETED" ? "수정 취소" : "평가 취소"}
+            </button>
+          ) : null}
           <button
             className="button save-button"
             type="button"
-            disabled={busy || !areScoresComplete(exam.scores, exam.fluency)}
+            disabled={busy || !dirty || Boolean(conflict) || !areScoresComplete(exam.scores, exam.fluency)}
             onClick={complete}
           >
             {exam.status === "COMPLETED" ? "평가 결과 저장" : "평가 완료"}

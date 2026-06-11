@@ -6,10 +6,14 @@ import type { BootstrapData, Student } from "@/lib/types";
 
 export function Dashboard({
   data,
+  draftCount,
+  onClearDrafts,
   onSelectStudent,
   onLogout,
 }: {
   data: BootstrapData;
+  draftCount: number;
+  onClearDrafts: () => void;
   onSelectStudent: (student: Student) => void;
   onLogout: () => void;
 }) {
@@ -37,7 +41,12 @@ export function Dashboard({
             <p>2026학년도 2학년 1학기 · 구술 수행평가</p>
           </div>
         </div>
-        <button className="button secondary" type="button" onClick={onLogout}>로그아웃</button>
+        <div className="topbar-actions">
+          <button className="button secondary" type="button" disabled={!draftCount} onClick={onClearDrafts}>
+            모든 초안 삭제{draftCount ? ` (${draftCount})` : ""}
+          </button>
+          <button className="button secondary" type="button" onClick={onLogout}>로그아웃</button>
+        </div>
       </header>
 
       <section className="progress-grid" aria-label="반별 평가 진행률">

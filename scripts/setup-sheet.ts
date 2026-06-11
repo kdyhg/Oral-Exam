@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { loadEnvFile } from "node:process";
 
@@ -7,7 +8,7 @@ import { google, type sheets_v4 } from "googleapis";
 import { deriveStudentFluency } from "../src/lib/exam-rules";
 import type { Mark } from "../src/lib/types";
 
-const TARGET_SHEETS = ["학생명렬", "문항목록", "평가기록", "진행현황", "설정"] as const;
+const TARGET_SHEETS = ["학생명렬", "문항목록", "평가기록", "평가이력", "진행현황", "설정"] as const;
 
 const QUESTIONS = [
   {
@@ -116,7 +117,9 @@ const EXAM_HEADERS = [
   "교사메모",
   "상태",
   "수정시각",
+  "revision",
 ];
+const HISTORY_HEADERS = ["saveId", "저장시각", "저장유형", ...EXAM_HEADERS];
 
 function mark(value: unknown): "O" | "X" | "" {
   return value === "O" || value === "X" ? value : "";
@@ -139,7 +142,70 @@ function migrateLegacyExamRows(rows: unknown[][]): (string | number | boolean)[]
       row[18] ?? "",
       row[19] ?? "",
       row[20] ?? "",
+      1,
     ] as (string | number | boolean)[]);
+}
+
+function normalizeExamRows(values: unknown[][]): (string | number | boolean)[][] {
+  const header = values[0] ?? [];
+  const legacy = String(header[13] ?? "").includes("유창성");
+  const versioned = String(header[19] ?? "") === "revision";
+  if (legacy) return migrateLegacyExamRows(values.slice(1));
+  return values
+    .slice(1)
+    .filter((row) => row[0] && row[1])
+    .map((row) => [
+      ...row.slice(0, 19).map(sheetValue),
+      versioned ? validRevision(row[19]) : 1,
+    ]);
+}
+
+function latestRowsByStudent(
+  rows: (string | number | boolean)[][],
+): Map<string, (string | number | boolean)[]> {
+  const latest = new Map<string, (string | number | boolean)[]>();
+  for (const row of rows) {
+    const studentId = String(row[1] ?? "");
+    const current = latest.get(studentId);
+    if (!current || newerExamRow(row, current)) latest.set(studentId, row);
+  }
+  return latest;
+}
+
+function newerExamRow(
+  candidate: (string | number | boolean)[],
+  current: (string | number | boolean)[],
+): boolean {
+  const candidateRevision = validRevision(candidate[19]);
+  const currentRevision = validRevision(current[19]);
+  if (candidateRevision !== currentRevision) return candidateRevision > currentRevision;
+  return String(candidate[18] ?? "") > String(current[18] ?? "");
+}
+
+function fixedExamRow(
+  student: (string | number | boolean)[],
+  existing: (string | number | boolean)[] | undefined,
+): (string | number | boolean)[] {
+  if (existing) return existing;
+  return [
+    "",
+    student[0],
+    student[1],
+    student[2],
+    student[3],
+    "", "", "", "", "", "", "", "", "", "", "", "", "", "", 0,
+  ];
+}
+
+function validRevision(value: unknown): number {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : 0;
+}
+
+function sheetValue(value: unknown): string | number | boolean {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    ? value
+    : String(value ?? "");
 }
 
 function requiredEnv(name: string): string {
@@ -215,6 +281,48 @@ async function replaceValues(
     range: `${sheetName}!A1`,
     valueInputOption: "USER_ENTERED",
     requestBody: { values },
+  });
+}
+
+async function backupExamValues(
+  sheets: sheets_v4.Sheets,
+  spreadsheetId: string,
+  values: unknown[][],
+): Promise<string | null> {
+  if (!values.length) return null;
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+/, "");
+  const title = `평가기록_백업_${stamp}_${randomUUID().slice(0, 6)}`;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${title}!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: values.map((row) => row.map(sheetValue)) },
+  });
+  return title;
+}
+
+async function trimSheetRows(
+  sheets: sheets_v4.Sheets,
+  spreadsheetId: string,
+  sheetId: number,
+  rowCount: number,
+): Promise<void> {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: { sheetId, gridProperties: { rowCount: Math.max(1, rowCount) } },
+            fields: "gridProperties.rowCount",
+          },
+        },
+      ],
+    },
   });
 }
 
@@ -338,6 +446,15 @@ async function main(): Promise<void> {
   const sheets = google.sheets({ version: "v4", auth });
   const ids = await ensureSheets(sheets, spreadsheetId);
 
+  const examValuesResponse = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "평가기록!A1:U",
+  });
+  const examValues = examValuesResponse.data.values ?? [];
+  const backupTitle = await backupExamValues(sheets, spreadsheetId, examValues);
+  const normalizedExamRows = normalizeExamRows(examValues);
+  const latestExamRows = latestRowsByStudent(normalizedExamRows);
+
   await replaceValues(sheets, spreadsheetId, "학생명렬", [
     ["studentId", "반", "번호", "이름", "활성"],
     ...students,
@@ -352,21 +469,31 @@ async function main(): Promise<void> {
     ["warningSeconds", 60, "종료 전 경고 시간(초)"],
   ]);
 
-  const examValuesResponse = await sheets.spreadsheets.values.get({
+  await replaceValues(sheets, spreadsheetId, "평가기록", [
+    EXAM_HEADERS,
+    ...students.map((student) => fixedExamRow(student, latestExamRows.get(String(student[0])))),
+  ]);
+
+  const historyValuesResponse = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: "평가기록!A1:U",
+    range: "평가이력!A1:W",
   });
-  const examValues = examValuesResponse.data.values ?? [];
-  const legacySheet = String(examValues[0]?.[13] ?? "").includes("유창성");
-  if (!examValues.length || legacySheet) {
-    const migratedRows = legacySheet ? migrateLegacyExamRows(examValues.slice(1)) : [];
-    await replaceValues(sheets, spreadsheetId, "평가기록", [EXAM_HEADERS, ...migratedRows]);
+  const historyValues = historyValuesResponse.data.values ?? [];
+  let historyRowCount = historyValues.length;
+  if (!historyValues.length) {
+    const migratedAt = new Date().toISOString();
+    const initializedHistory = [
+      HISTORY_HEADERS,
+      ...normalizedExamRows.map((row) => [randomUUID(), migratedAt, "MIGRATION", ...row]),
+    ];
+    await replaceValues(sheets, spreadsheetId, "평가이력", initializedHistory);
+    historyRowCount = initializedHistory.length;
   } else {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: "평가기록!A1:S1",
+      range: "평가이력!A1:W1",
       valueInputOption: "RAW",
-      requestBody: { values: [EXAM_HEADERS] },
+      requestBody: { values: [HISTORY_HEADERS] },
     });
   }
 
@@ -389,8 +516,13 @@ async function main(): Promise<void> {
     ...progressRows,
   ]);
   await formatSheets(sheets, spreadsheetId, ids);
+  const historySheetId = ids.get("평가이력");
+  if (historySheetId !== undefined) {
+    await trimSheetRows(sheets, spreadsheetId, historySheetId, historyRowCount);
+  }
 
   console.log(`설정 완료: 학생 ${students.length}명, 문항 ${QUESTIONS.length}개`);
+  if (backupTitle) console.log(`기존 평가기록 백업: ${backupTitle}`);
   console.log(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`);
 }
 

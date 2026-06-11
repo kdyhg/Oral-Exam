@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { google, type sheets_v4 } from "googleapis";
 
 import { areScoresComplete, buildClassProgress, deriveStudentFluency, isMark } from "@/lib/exam-rules";
+import { hasRevisionConflict, nextRevision, saveType, storedEndedAt } from "@/lib/exam-version";
 import type {
   AppSettings,
   BootstrapData,
   Exam,
+  ExamSubmission,
   Mark,
   Question,
   Score,
@@ -16,11 +18,20 @@ import type {
 const ROSTER_SHEET = "학생명렬";
 const QUESTIONS_SHEET = "문항목록";
 const EXAMS_SHEET = "평가기록";
+const HISTORY_SHEET = "평가이력";
 const SETTINGS_SHEET = "설정";
 const DEFAULT_SETTINGS: AppSettings = { durationSeconds: 360, warningSeconds: 60 };
 
-type ExamRow = { exam: Exam; rowNumber: number };
-type ExamSheetSchema = "legacy" | "current";
+type ExamRow = { exam: Exam | null; studentId: string; rowNumber: number };
+type ExamSheetSchema = "legacy" | "current" | "versioned";
+
+export class ExamConflictError extends Error {
+  readonly code = "VERSION_CONFLICT";
+
+  constructor(readonly latestExam: Exam | null) {
+    super("다른 기기에서 이 학생의 평가 기록이 먼저 저장되었습니다.");
+  }
+}
 
 function requiredEnv(
   name: "GOOGLE_SHEET_ID" | "GOOGLE_SERVICE_ACCOUNT_EMAIL" | "GOOGLE_PRIVATE_KEY",
@@ -52,7 +63,14 @@ function mark(row: unknown[], index: number): Mark {
   return value === "O" || value === "X" ? value : null;
 }
 
-function parseExam(row: unknown[], schema: ExamSheetSchema): Exam {
+function revision(row: unknown[], schema: ExamSheetSchema): number {
+  if (schema !== "versioned") return text(row, 0) ? 1 : 0;
+  const value = Number(row[19]);
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function parseExam(row: unknown[], schema: ExamSheetSchema): Exam | null {
+  if (!text(row, 0)) return null;
   const questionIds = [text(row, 5), text(row, 6), text(row, 7)] as [
     string,
     string,
@@ -82,35 +100,11 @@ function parseExam(row: unknown[], schema: ExamSheetSchema): Exam {
     memo: text(row, legacy ? 18 : 16),
     status: text(row, legacy ? 19 : 17) === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS",
     updatedAt: text(row, legacy ? 20 : 18),
+    revision: revision(row, schema),
   };
 }
 
-function serializeExam(exam: Exam, schema: ExamSheetSchema): (string | number)[] {
-  if (schema === "legacy") {
-    return [
-      exam.examId,
-      exam.studentId,
-      exam.className,
-      exam.number,
-      exam.name,
-      exam.selfQuestionId,
-      exam.randomQuestionIds[0],
-      exam.randomQuestionIds[1],
-      exam.startedAt,
-      exam.endedAt ?? "",
-      exam.hintQuestionId ?? "",
-      exam.hintAt ?? "",
-      exam.scores[0].correct ?? "",
-      exam.fluency ?? "",
-      exam.scores[1].correct ?? "",
-      exam.fluency ?? "",
-      exam.scores[2].correct ?? "",
-      exam.fluency ?? "",
-      exam.memo,
-      exam.status,
-      exam.updatedAt,
-    ];
-  }
+function serializeExam(exam: Exam): (string | number)[] {
   return [
     exam.examId,
     exam.studentId,
@@ -131,6 +125,7 @@ function serializeExam(exam: Exam, schema: ExamSheetSchema): (string | number)[]
     exam.memo,
     exam.status,
     exam.updatedAt,
+    exam.revision,
   ];
 }
 
@@ -167,15 +162,23 @@ async function readQuestions(): Promise<Question[]> {
 
 async function readExamRows(): Promise<{ rows: ExamRow[]; schema: ExamSheetSchema }> {
   const values = await readRange(`${EXAMS_SHEET}!A1:U`);
-  const schema: ExamSheetSchema = text(values[0] ?? [], 13).includes("유창성")
-    ? "legacy"
-    : "current";
+  const header = values[0] ?? [];
+  const schema: ExamSheetSchema =
+    text(header, 19) === "revision"
+      ? "versioned"
+      : text(header, 13).includes("유창성")
+        ? "legacy"
+        : "current";
   return {
     schema,
     rows: values
       .slice(1)
-      .map((row, index) => ({ exam: parseExam(row, schema), rowNumber: index + 2 }))
-      .filter(({ exam }) => exam.examId),
+      .map((row, index) => ({
+        exam: parseExam(row, schema),
+        studentId: text(row, 1),
+        rowNumber: index + 2,
+      }))
+      .filter(({ studentId }) => studentId),
   };
 }
 
@@ -195,7 +198,7 @@ export async function getBootstrapData(): Promise<BootstrapData> {
     readExamRows(),
     readSettings(),
   ]);
-  const exams = examRows.rows.map(({ exam }) => exam);
+  const exams = latestExams(examRows.rows);
   return {
     students,
     questions,
@@ -205,15 +208,60 @@ export async function getBootstrapData(): Promise<BootstrapData> {
   };
 }
 
-export async function submitExam(input: Exam): Promise<Exam> {
+export async function submitExam(submission: ExamSubmission): Promise<Exam> {
+  const { exam: input, baseRevision, forceOverwrite } = submission;
   const [students, questions, examRows] = await Promise.all([
     readStudents(),
     readQuestions(),
     readExamRows(),
   ]);
+  if (examRows.schema !== "versioned") {
+    throw new Error("평가기록 Sheet를 최신 형식으로 마이그레이션한 뒤 저장해 주세요.");
+  }
+
   const student = students.find((item) => item.studentId === input.studentId && item.active);
   if (!student) throw new Error("활성 학생을 찾을 수 없습니다.");
+  validateExam(input, questions);
 
+  const fixedRow = examRows.rows.find((row) => row.studentId === input.studentId);
+  if (!fixedRow) {
+    throw new Error("학생별 고정 평가 행을 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
+  }
+  const existing = fixedRow.exam;
+  const currentRevision = existing?.revision ?? 0;
+  if (hasRevisionConflict(baseRevision, currentRevision, forceOverwrite)) {
+    throw new ExamConflictError(existing);
+  }
+
+  const now = new Date().toISOString();
+  const exam: Exam = {
+    examId: existing?.examId ?? input.examId ?? randomUUID(),
+    studentId: student.studentId,
+    className: student.className,
+    number: student.number,
+    name: student.name,
+    selfQuestionId: input.selfQuestionId,
+    randomQuestionIds: input.randomQuestionIds,
+    startedAt: existing?.startedAt ?? validDateOr(input.startedAt, now),
+    endedAt: storedEndedAt(existing, now),
+    hintQuestionId: input.hintQuestionId,
+    hintAt: input.hintQuestionId && input.hintAt ? input.hintAt : null,
+    scores: input.scores.map((score) => ({
+      questionId: score.questionId,
+      correct: isMark(score.correct) ? score.correct : null,
+    })) as [Score, Score, Score],
+    fluency: input.fluency,
+    memo: input.memo.slice(0, 1000),
+    status: "COMPLETED",
+    updatedAt: now,
+    revision: nextRevision(currentRevision),
+  };
+
+  await writeExamAndHistory(fixedRow.rowNumber, exam, saveType(existing, forceOverwrite));
+  return exam;
+}
+
+function validateExam(input: Exam, questions: Question[]): void {
   const selfQuestion = questions.find(
     (question) => question.id === input.selfQuestionId && question.type === "SELF",
   );
@@ -243,47 +291,83 @@ export async function submitExam(input: Exam): Promise<Exam> {
   if (input.hintQuestionId && !assignedIds.includes(input.hintQuestionId)) {
     throw new Error("배정된 문항에만 Hint를 사용할 수 있습니다.");
   }
+}
 
-  const existing = examRows.rows.find(({ exam }) => exam.studentId === input.studentId);
-  const now = new Date().toISOString();
-  const exam: Exam = {
-    examId: existing?.exam.examId ?? randomUUID(),
-    studentId: student.studentId,
-    className: student.className,
-    number: student.number,
-    name: student.name,
-    selfQuestionId: input.selfQuestionId,
-    randomQuestionIds: input.randomQuestionIds,
-    startedAt: Number.isNaN(Date.parse(input.startedAt)) ? now : input.startedAt,
-    endedAt: now,
-    hintQuestionId: input.hintQuestionId,
-    hintAt: input.hintQuestionId && input.hintAt ? input.hintAt : null,
-    scores: input.scores.map((score) => ({
-      questionId: score.questionId,
-      correct: isMark(score.correct) ? score.correct : null,
-    })) as [Score, Score, Score],
-    fluency: input.fluency,
-    memo: input.memo.slice(0, 1000),
-    status: "COMPLETED",
-    updatedAt: now,
-  };
-
+async function writeExamAndHistory(
+  rowNumber: number,
+  exam: Exam,
+  historyType: ReturnType<typeof saveType>,
+): Promise<void> {
   const { sheets, spreadsheetId } = getClient();
-  if (existing) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: `${EXAMS_SHEET}!A${existing.rowNumber}:${examRows.schema === "legacy" ? "U" : "S"}${existing.rowNumber}`,
-      valueInputOption: "RAW",
-      requestBody: { values: [serializeExam(exam, examRows.schema)] },
-    });
-  } else {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: `${EXAMS_SHEET}!A:${examRows.schema === "legacy" ? "U" : "S"}`,
-      valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [serializeExam(exam, examRows.schema)] },
-    });
+  const metadata = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties(sheetId,title)",
+  });
+  const ids = new Map(
+    metadata.data.sheets?.map((sheet) => [
+      sheet.properties?.title ?? "",
+      sheet.properties?.sheetId ?? -1,
+    ]),
+  );
+  const examSheetId = ids.get(EXAMS_SHEET);
+  const historySheetId = ids.get(HISTORY_SHEET);
+  if (examSheetId === undefined || examSheetId < 0 || historySheetId === undefined || historySheetId < 0) {
+    throw new Error("평가기록 또는 평가이력 Sheet를 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
   }
-  return exam;
+
+  const history = [randomUUID(), exam.updatedAt, historyType, ...serializeExam(exam)];
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateCells: {
+            range: {
+              sheetId: examSheetId,
+              startRowIndex: rowNumber - 1,
+              endRowIndex: rowNumber,
+              startColumnIndex: 0,
+              endColumnIndex: 20,
+            },
+            rows: [{ values: serializeExam(exam).map(cellData) }],
+            fields: "userEnteredValue",
+          },
+        },
+        {
+          appendCells: {
+            sheetId: historySheetId,
+            rows: [{ values: history.map(cellData) }],
+            fields: "userEnteredValue",
+          },
+        },
+      ],
+    },
+  });
+}
+
+function latestExams(rows: ExamRow[]): Exam[] {
+  const latest = new Map<string, Exam>();
+  for (const row of rows) {
+    if (!row.exam) continue;
+    const current = latest.get(row.exam.studentId);
+    if (
+      !current ||
+      row.exam.revision > current.revision ||
+      (row.exam.revision === current.revision && row.exam.updatedAt > current.updatedAt)
+    ) {
+      latest.set(row.exam.studentId, row.exam);
+    }
+  }
+  return [...latest.values()];
+}
+
+function cellData(value: string | number): sheets_v4.Schema$CellData {
+  return {
+    userEnteredValue:
+      typeof value === "number" ? { numberValue: value } : { stringValue: value },
+  };
+}
+
+function validDateOr(value: string, fallback: string): string {
+  return Number.isNaN(Date.parse(value)) ? fallback : value;
 }
