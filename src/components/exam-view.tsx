@@ -123,15 +123,18 @@ export function ExamView({
 
       {error ? <div className="notice error">{error}</div> : null}
       {busy ? <div className="notice info">최종 평가 결과를 Google Sheet에 저장하고 있습니다...</div> : null}
+      <div className="notice requirement-notice">
+        필수 입력: 문항별 정답 3개와 학생별 유창성 · Hint는 선택 사항
+      </div>
       {conflict ? (
         <section className="notice conflict-notice" role="alert">
           <div>
-            <strong>다른 기기에서 이 학생의 기록이 먼저 저장되었습니다.</strong>
-            <span>최신 기록을 불러오거나, 현재 화면의 결과로 강제 저장할 수 있습니다.</span>
+            <strong>다른 기기에서 이 학생의 기록이 먼저 변경되었습니다.</strong>
+            <span>최신 상태를 불러오거나, 현재 화면의 결과로 강제 저장할 수 있습니다.</span>
           </div>
           <div className="conflict-actions">
             <button className="button secondary" type="button" disabled={busy} onClick={onUseLatest}>
-              최신 기록 불러오기
+              최신 상태 불러오기
             </button>
             <button className="button danger" type="button" disabled={busy} onClick={onForceSubmit}>
               현재 결과 강제 저장

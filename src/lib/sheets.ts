@@ -2,12 +2,27 @@ import { randomUUID } from "node:crypto";
 
 import { google, type sheets_v4 } from "googleapis";
 
-import { areScoresComplete, buildClassProgress, deriveStudentFluency, isMark } from "@/lib/exam-rules";
-import { hasRevisionConflict, nextRevision, saveType, storedEndedAt } from "@/lib/exam-version";
+import {
+  areScoresComplete,
+  buildClassProgress,
+  deriveStudentFluency,
+  isHintStateValid,
+  isMark,
+} from "@/lib/exam-rules";
+import {
+  hasRevisionConflict,
+  nextRevision,
+  resetHistoryExam,
+  saveType,
+  serializeResetRecord,
+  storedEndedAt,
+  type SaveType,
+} from "@/lib/exam-version";
 import type {
   AppSettings,
   BootstrapData,
   Exam,
+  ExamResetResult,
   ExamSubmission,
   Mark,
   Question,
@@ -22,13 +37,16 @@ const HISTORY_SHEET = "평가이력";
 const SETTINGS_SHEET = "설정";
 const DEFAULT_SETTINGS: AppSettings = { durationSeconds: 360, warningSeconds: 60 };
 
-type ExamRow = { exam: Exam | null; studentId: string; rowNumber: number };
+type ExamRow = { exam: Exam | null; studentId: string; rowNumber: number; revision: number };
 type ExamSheetSchema = "legacy" | "current" | "versioned";
 
 export class ExamConflictError extends Error {
   readonly code = "VERSION_CONFLICT";
 
-  constructor(readonly latestExam: Exam | null) {
+  constructor(
+    readonly latestExam: Exam | null,
+    readonly latestRevision: number,
+  ) {
     super("다른 기기에서 이 학생의 평가 기록이 먼저 저장되었습니다.");
   }
 }
@@ -177,6 +195,7 @@ async function readExamRows(): Promise<{ rows: ExamRow[]; schema: ExamSheetSchem
         exam: parseExam(row, schema),
         studentId: text(row, 1),
         rowNumber: index + 2,
+        revision: revision(row, schema),
       }))
       .filter(({ studentId }) => studentId),
   };
@@ -203,6 +222,9 @@ export async function getBootstrapData(): Promise<BootstrapData> {
     students,
     questions,
     exams,
+    recordRevisions: Object.fromEntries(
+      examRows.rows.map((row) => [row.studentId, row.revision]),
+    ),
     settings,
     progress: buildClassProgress(students, exams),
   };
@@ -228,9 +250,9 @@ export async function submitExam(submission: ExamSubmission): Promise<Exam> {
     throw new Error("학생별 고정 평가 행을 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
   }
   const existing = fixedRow.exam;
-  const currentRevision = existing?.revision ?? 0;
+  const currentRevision = fixedRow.revision;
   if (hasRevisionConflict(baseRevision, currentRevision, forceOverwrite)) {
-    throw new ExamConflictError(existing);
+    throw new ExamConflictError(existing, currentRevision);
   }
 
   const now = new Date().toISOString();
@@ -261,6 +283,35 @@ export async function submitExam(submission: ExamSubmission): Promise<Exam> {
   return exam;
 }
 
+export async function resetExam(
+  studentId: string,
+  baseRevision: number,
+): Promise<ExamResetResult> {
+  const [students, examRows] = await Promise.all([readStudents(), readExamRows()]);
+  if (examRows.schema !== "versioned") {
+    throw new Error("평가기록 Sheet를 최신 형식으로 마이그레이션한 뒤 초기화해 주세요.");
+  }
+
+  const student = students.find((item) => item.studentId === studentId && item.active);
+  if (!student) throw new Error("활성 학생을 찾을 수 없습니다.");
+
+  const fixedRow = examRows.rows.find((row) => row.studentId === studentId);
+  if (!fixedRow) {
+    throw new Error("학생별 고정 평가 행을 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
+  }
+  if (hasRevisionConflict(baseRevision, fixedRow.revision, false)) {
+    throw new ExamConflictError(fixedRow.exam, fixedRow.revision);
+  }
+  if (!fixedRow.exam || fixedRow.exam.status !== "COMPLETED") {
+    throw new Error("초기화할 완료 평가 기록이 없습니다.");
+  }
+
+  const now = new Date().toISOString();
+  const historyExam = resetHistoryExam(fixedRow.exam, now);
+  await writeResetAndHistory(fixedRow.rowNumber, student, historyExam);
+  return { studentId, revision: historyExam.revision };
+}
+
 function validateExam(input: Exam, questions: Question[]): void {
   const selfQuestion = questions.find(
     (question) => question.id === input.selfQuestionId && question.type === "SELF",
@@ -288,33 +339,17 @@ function validateExam(input: Exam, questions: Question[]): void {
   ) {
     throw new Error("정답 여부 3개와 학생별 유창성을 모두 선택해 주세요.");
   }
-  if (input.hintQuestionId && !assignedIds.includes(input.hintQuestionId)) {
-    throw new Error("배정된 문항에만 Hint를 사용할 수 있습니다.");
+  if (!isHintStateValid(input.hintQuestionId, input.hintAt, assignedIds)) {
+    throw new Error("Hint를 사용했다면 대상 문항과 사용 시각을 함께 기록해 주세요.");
   }
 }
 
 async function writeExamAndHistory(
   rowNumber: number,
   exam: Exam,
-  historyType: ReturnType<typeof saveType>,
+  historyType: SaveType,
 ): Promise<void> {
-  const { sheets, spreadsheetId } = getClient();
-  const metadata = await sheets.spreadsheets.get({
-    spreadsheetId,
-    fields: "sheets.properties(sheetId,title)",
-  });
-  const ids = new Map(
-    metadata.data.sheets?.map((sheet) => [
-      sheet.properties?.title ?? "",
-      sheet.properties?.sheetId ?? -1,
-    ]),
-  );
-  const examSheetId = ids.get(EXAMS_SHEET);
-  const historySheetId = ids.get(HISTORY_SHEET);
-  if (examSheetId === undefined || examSheetId < 0 || historySheetId === undefined || historySheetId < 0) {
-    throw new Error("평가기록 또는 평가이력 Sheet를 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
-  }
-
+  const { sheets, spreadsheetId, examSheetId, historySheetId } = await getWritableSheets();
   const history = [randomUUID(), exam.updatedAt, historyType, ...serializeExam(exam)];
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
@@ -333,16 +368,98 @@ async function writeExamAndHistory(
             fields: "userEnteredValue",
           },
         },
-        {
-          appendCells: {
-            sheetId: historySheetId,
-            rows: [{ values: history.map(cellData) }],
-            fields: "userEnteredValue",
-          },
-        },
+        ...historyInsertRequests(historySheetId, history),
       ],
     },
   });
+}
+
+async function writeResetAndHistory(
+  rowNumber: number,
+  student: Student,
+  historyExam: Exam,
+): Promise<void> {
+  const { sheets, spreadsheetId, examSheetId, historySheetId } = await getWritableSheets();
+  const resetRow = serializeResetRecord(student, historyExam.revision);
+  const history = [randomUUID(), historyExam.updatedAt, "RESET", ...serializeExam(historyExam)];
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateCells: {
+            range: {
+              sheetId: examSheetId,
+              startRowIndex: rowNumber - 1,
+              endRowIndex: rowNumber,
+              startColumnIndex: 0,
+              endColumnIndex: 20,
+            },
+            rows: [{ values: resetRow.map(cellData) }],
+            fields: "userEnteredValue",
+          },
+        },
+        ...historyInsertRequests(historySheetId, history),
+      ],
+    },
+  });
+}
+
+async function getWritableSheets(): Promise<{
+  sheets: sheets_v4.Sheets;
+  spreadsheetId: string;
+  examSheetId: number;
+  historySheetId: number;
+}> {
+  const { sheets, spreadsheetId } = getClient();
+  const metadata = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties(sheetId,title)",
+  });
+  const ids = new Map(
+    metadata.data.sheets?.map((sheet) => [
+      sheet.properties?.title ?? "",
+      sheet.properties?.sheetId ?? -1,
+    ]),
+  );
+  const examSheetId = ids.get(EXAMS_SHEET);
+  const historySheetId = ids.get(HISTORY_SHEET);
+  if (examSheetId === undefined || examSheetId < 0 || historySheetId === undefined || historySheetId < 0) {
+    throw new Error("평가기록 또는 평가이력 Sheet를 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
+  }
+  return { sheets, spreadsheetId, examSheetId, historySheetId };
+}
+
+function historyInsertRequests(
+  historySheetId: number,
+  history: (string | number)[],
+): sheets_v4.Schema$Request[] {
+  return [
+    {
+      insertDimension: {
+        range: {
+          sheetId: historySheetId,
+          dimension: "ROWS",
+          startIndex: 1,
+          endIndex: 2,
+        },
+        inheritFromBefore: false,
+      },
+    },
+    {
+      updateCells: {
+        range: {
+          sheetId: historySheetId,
+          startRowIndex: 1,
+          endRowIndex: 2,
+          startColumnIndex: 0,
+          endColumnIndex: 23,
+        },
+        rows: [{ values: history.map(cellData) }],
+        fields: "userEnteredValue",
+      },
+    },
+  ];
 }
 
 function latestExams(rows: ExamRow[]): Exam[] {

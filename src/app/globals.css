@@ -238,6 +238,12 @@ button:disabled {
   background: #edf4ff;
 }
 
+.notice.requirement-notice {
+  color: #36536f;
+  border: 1px solid #cddbea;
+  background: #f7faff;
+}
+
 .notice.conflict-notice {
   display: flex;
   align-items: center;
@@ -335,21 +341,47 @@ button:disabled {
   padding: 18px;
 }
 
+.student-card {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+}
+
 .student {
   display: flex;
   align-items: center;
   gap: 11px;
   min-height: 68px;
   padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  border: 0;
+  border-radius: 0;
   text-align: left;
   background: #fff;
 }
 
 .student:hover {
-  border-color: #9cb8e9;
   background: #f7faff;
+}
+
+.student-card:hover {
+  border-color: #9cb8e9;
+}
+
+.student-reset {
+  min-height: 34px;
+  border: 0;
+  border-top: 1px solid #f0caca;
+  color: #a93030;
+  background: #fff5f5;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.student-reset:hover:not(:disabled) {
+  color: #fff;
+  background: var(--red);
 }
 
 .student-number {

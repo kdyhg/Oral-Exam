@@ -46,7 +46,12 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
     if (error instanceof ExamConflictError) {
       return NextResponse.json(
-        { error: error.message, code: error.code, latestExam: error.latestExam },
+        {
+          error: error.message,
+          code: error.code,
+          latestExam: error.latestExam,
+          latestRevision: error.latestRevision,
+        },
         { status: 409 },
       );
     }

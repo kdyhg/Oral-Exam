@@ -57,6 +57,12 @@ export interface ExamSubmission {
 export interface ExamConflict {
   code: "VERSION_CONFLICT";
   latestExam: Exam | null;
+  latestRevision: number;
+}
+
+export interface ExamResetResult {
+  studentId: string;
+  revision: number;
 }
 
 export interface AppSettings {
@@ -75,6 +81,7 @@ export interface BootstrapData {
   students: Student[];
   questions: Question[];
   exams: Exam[];
+  recordRevisions: Record<string, number>;
   settings: AppSettings;
   progress: ClassProgress[];
 }

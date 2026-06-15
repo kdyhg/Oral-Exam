@@ -53,7 +53,7 @@ describe("mergeExams", () => {
   });
 
   it("Sheet revision이 달라지면 오래된 초안으로 판정한다", () => {
-    expect(isDraftStale(draft, { ...exam, revision: 1 })).toBe(true);
-    expect(isDraftStale(draft, { ...exam, revision: 0 })).toBe(false);
+    expect(isDraftStale(draft, 1)).toBe(true);
+    expect(isDraftStale(draft, 0)).toBe(false);
   });
 });

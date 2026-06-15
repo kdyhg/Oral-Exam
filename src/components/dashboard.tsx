@@ -7,13 +7,19 @@ import type { BootstrapData, Student } from "@/lib/types";
 export function Dashboard({
   data,
   draftCount,
+  error,
+  resettingStudentId,
   onClearDrafts,
+  onResetStudent,
   onSelectStudent,
   onLogout,
 }: {
   data: BootstrapData;
   draftCount: number;
+  error: string;
+  resettingStudentId: string | null;
   onClearDrafts: () => void;
+  onResetStudent: (student: Student) => void;
   onSelectStudent: (student: Student) => void;
   onLogout: () => void;
 }) {
@@ -64,6 +70,8 @@ export function Dashboard({
         ))}
       </section>
 
+      {error ? <div className="notice error">{error}</div> : null}
+
       <section className="card roster-card">
         <div className="roster-toolbar">
           <div>
@@ -83,11 +91,28 @@ export function Dashboard({
             {students.map((student) => {
               const exam = examByStudent.get(student.studentId);
               return (
-                <button className="student" key={student.studentId} type="button" onClick={() => onSelectStudent(student)}>
-                  <span className="student-number">{student.number}</span>
-                  <span className="student-name">{student.name}</span>
-                  <span className={`status-dot ${exam?.status === "COMPLETED" ? "completed" : exam ? "in-progress" : ""}`} />
-                </button>
+                <div className="student-card" key={student.studentId}>
+                  <button
+                    className="student"
+                    type="button"
+                    onClick={() => onSelectStudent(student)}
+                  >
+                    <span className="student-number">{student.number}</span>
+                    <span className="student-name">{student.name}</span>
+                    <span className={`status-dot ${exam?.status === "COMPLETED" ? "completed" : exam ? "in-progress" : ""}`} />
+                  </button>
+                  {exam?.status === "COMPLETED" ? (
+                    <button
+                      className="student-reset"
+                      type="button"
+                      disabled={Boolean(resettingStudentId)}
+                      aria-label={`${student.className} ${student.number}번 ${student.name} 기록 초기화`}
+                      onClick={() => onResetStudent(student)}
+                    >
+                      {resettingStudentId === student.studentId ? "초기화 중" : "기록 초기화"}
+                    </button>
+                  ) : null}
+                </div>
               );
             })}
           </div>

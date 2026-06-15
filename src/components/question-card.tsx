@@ -36,7 +36,7 @@ export function QuestionCard({
           disabled={busy || hintUsedElsewhere || usedHere}
           onClick={() => onHint(question.id)}
         >
-          {usedHere ? "Hint 사용 완료" : hintUsedElsewhere ? "Hint 사용됨" : "Hint 사용"}
+          {usedHere ? "Hint 사용 완료" : hintUsedElsewhere ? "Hint 사용됨" : "Hint 사용 (선택)"}
         </button>
       </div>
       <p className="question-text"><MathText>{question.prompt}</MathText></p>

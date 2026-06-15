@@ -29,8 +29,8 @@ export function mergeExams(saved: Exam[], drafts: ExamDrafts): Exam[] {
   return [...merged.values()];
 }
 
-export function isDraftStale(draft: ExamDraft, saved: Exam | undefined): boolean {
-  return Boolean(saved && draft.baseRevision !== saved.revision);
+export function isDraftStale(draft: ExamDraft, currentRevision: number): boolean {
+  return draft.baseRevision !== currentRevision;
 }
 
 export function pruneExpiredDrafts(drafts: ExamDrafts, now = Date.now()): ExamDrafts {

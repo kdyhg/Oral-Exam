@@ -16,7 +16,14 @@ import {
   type ExamDrafts,
 } from "@/lib/drafts";
 import { buildClassProgress, pickRandomQuestionIds } from "@/lib/exam-rules";
-import type { BootstrapData, Exam, ExamConflict, ExamDraft, Student } from "@/lib/types";
+import type {
+  BootstrapData,
+  Exam,
+  ExamConflict,
+  ExamDraft,
+  ExamResetResult,
+  Student,
+} from "@/lib/types";
 
 export function OralExamApp() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -24,6 +31,7 @@ export function OralExamApp() {
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [drafts, setDrafts] = useState<ExamDrafts>(readBrowserDrafts);
   const [conflict, setConflict] = useState<ExamConflict | null>(null);
+  const [resettingStudentId, setResettingStudentId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -130,6 +138,7 @@ export function OralExamApp() {
       data.questions.filter((question) => question.type === "RANDOM").map((question) => question.id),
     );
     const now = new Date().toISOString();
+    const currentRevision = data.recordRevisions[selectedStudent.studentId] ?? 0;
     const exam: Exam = {
       examId: crypto.randomUUID(),
       studentId: selectedStudent.studentId,
@@ -151,22 +160,24 @@ export function OralExamApp() {
       memo: "",
       status: "IN_PROGRESS",
       updatedAt: now,
-      revision: 0,
+      revision: currentRevision,
     };
     setDrafts((current) => ({
       ...current,
-      [exam.studentId]: { exam, baseRevision: 0, touchedAt: now },
+      [exam.studentId]: { exam, baseRevision: currentRevision, touchedAt: now },
     }));
   }
 
   function updateDraft(exam: Exam) {
     const now = new Date().toISOString();
-    const saved = data?.exams.find((item) => item.studentId === exam.studentId);
     setDrafts((current) => ({
       ...current,
       [exam.studentId]: {
         exam,
-        baseRevision: current[exam.studentId]?.baseRevision ?? saved?.revision ?? 0,
+        baseRevision:
+          current[exam.studentId]?.baseRevision ??
+          data?.recordRevisions[exam.studentId] ??
+          0,
         touchedAt: now,
       },
     }));
@@ -192,7 +203,11 @@ export function OralExamApp() {
       setConflict(null);
     } catch (saveError) {
       if (saveError instanceof ApiRequestError && saveError.code === "VERSION_CONFLICT") {
-        setConflict({ code: "VERSION_CONFLICT", latestExam: saveError.latestExam });
+        setConflict({
+          code: "VERSION_CONFLICT",
+          latestExam: saveError.latestExam,
+          latestRevision: saveError.latestRevision,
+        });
       }
       setError(message(saveError));
     } finally {
@@ -223,9 +238,31 @@ export function OralExamApp() {
     setError("");
   }
 
-  function acceptLatestRecord(latestExam: Exam | null) {
-    if (latestExam) replaceSavedExam(latestExam);
-    if (selectedStudent) removeDraft(selectedStudent.studentId);
+  function acceptLatestRecord(latestExam: Exam | null, latestRevision: number) {
+    if (selectedStudent) {
+      setData((current) => {
+        if (!current) return current;
+        const exams = latestExam
+          ? current.exams.some((item) => item.studentId === latestExam.studentId)
+            ? current.exams.map((item) =>
+                item.studentId === latestExam.studentId ? latestExam : item,
+              )
+            : [...current.exams, latestExam]
+          : current.exams.filter(
+              (item) => item.studentId !== selectedStudent.studentId,
+            );
+        return {
+          ...current,
+          exams,
+          recordRevisions: {
+            ...current.recordRevisions,
+            [selectedStudent.studentId]: latestRevision,
+          },
+          progress: buildClassProgress(current.students, exams),
+        };
+      });
+      removeDraft(selectedStudent.studentId);
+    }
     setConflict(null);
     setError("");
   }
@@ -236,8 +273,66 @@ export function OralExamApp() {
       const exams = current.exams.some((item) => item.studentId === saved.studentId)
         ? current.exams.map((item) => (item.studentId === saved.studentId ? saved : item))
         : [...current.exams, saved];
-      return { ...current, exams, progress: buildClassProgress(current.students, exams) };
+      return {
+        ...current,
+        exams,
+        recordRevisions: {
+          ...current.recordRevisions,
+          [saved.studentId]: saved.revision,
+        },
+        progress: buildClassProgress(current.students, exams),
+      };
     });
+  }
+
+  async function resetStudentRecord(student: Student) {
+    const saved = data?.exams.find(
+      (exam) => exam.studentId === student.studentId && exam.status === "COMPLETED",
+    );
+    if (!saved) return;
+    if (
+      !window.confirm(
+        `${student.className} ${student.number}번 ${student.name} 학생의 완료 기록을 초기화하시겠습니까?\n\n학생은 미평가 상태로 돌아가며, 기존 결과는 평가이력에 보존됩니다.`,
+      )
+    ) {
+      return;
+    }
+
+    setResettingStudentId(student.studentId);
+    setError("");
+    try {
+      const result = await request<ExamResetResult>(
+        `/api/exams/${encodeURIComponent(student.studentId)}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({
+            baseRevision: data?.recordRevisions[student.studentId] ?? saved.revision,
+          }),
+        },
+      );
+      setData((current) => {
+        if (!current) return current;
+        const exams = current.exams.filter((exam) => exam.studentId !== result.studentId);
+        return {
+          ...current,
+          exams,
+          recordRevisions: {
+            ...current.recordRevisions,
+            [result.studentId]: result.revision,
+          },
+          progress: buildClassProgress(current.students, exams),
+        };
+      });
+      removeDraft(result.studentId);
+    } catch (resetError) {
+      if (resetError instanceof ApiRequestError && resetError.code === "VERSION_CONFLICT") {
+        const payload = await fetchBootstrap();
+        if (payload) setData(payload);
+      }
+      setError(message(resetError));
+    } finally {
+      setResettingStudentId(null);
+    }
   }
 
   function removeDraft(studentId: string) {
@@ -264,9 +359,16 @@ export function OralExamApp() {
   const draft = activeDraft();
   const saved = savedExam();
   const exam = draft?.exam ?? saved;
+  const currentRevision = selectedStudent
+    ? visibleData.recordRevisions[selectedStudent.studentId] ?? 0
+    : 0;
   const detectedConflict: ExamConflict | null =
-    draft && isDraftStale(draft, saved)
-      ? { code: "VERSION_CONFLICT", latestExam: saved ?? null }
+    draft && isDraftStale(draft, currentRevision)
+      ? {
+          code: "VERSION_CONFLICT",
+          latestExam: saved ?? null,
+          latestRevision: currentRevision,
+        }
       : null;
   const visibleConflict = conflict ?? detectedConflict;
 
@@ -289,7 +391,12 @@ export function OralExamApp() {
         onChange={updateDraft}
         onDiscard={draft ? discardActiveDraft : undefined}
         onSubmit={submitDraft}
-        onUseLatest={() => acceptLatestRecord(visibleConflict?.latestExam ?? null)}
+        onUseLatest={() =>
+          acceptLatestRecord(
+            visibleConflict?.latestExam ?? null,
+            visibleConflict?.latestRevision ?? currentRevision,
+          )
+        }
         onForceSubmit={() => draft && submitDraft(draft.exam, true)}
       />
     );
@@ -309,7 +416,10 @@ export function OralExamApp() {
     <Dashboard
       data={visibleData}
       draftCount={Object.keys(drafts).length}
+      error={error}
+      resettingStudentId={resettingStudentId}
       onClearDrafts={clearAllDrafts}
+      onResetStudent={resetStudentRecord}
       onSelectStudent={selectStudent}
       onLogout={logout}
     />
@@ -321,6 +431,7 @@ class ApiRequestError extends Error {
     message: string,
     readonly code?: string,
     readonly latestExam: Exam | null = null,
+    readonly latestRevision = 0,
   ) {
     super(message);
   }
@@ -337,6 +448,7 @@ async function request<T = unknown>(url: string, init: RequestInit): Promise<T> 
       payload.error ?? "요청을 처리하지 못했습니다.",
       payload.code,
       payload.latestExam ?? null,
+      payload.latestRevision ?? 0,
     );
   }
   return payload;

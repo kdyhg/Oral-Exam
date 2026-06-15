@@ -5,6 +5,7 @@ import {
   areScoresComplete,
   buildClassProgress,
   deriveStudentFluency,
+  isHintStateValid,
   pickRandomQuestionIds,
 } from "./exam-rules";
 import type { Exam, Score, Student } from "./types";
@@ -21,7 +22,7 @@ describe("pickRandomQuestionIds", () => {
 });
 
 describe("areScoresComplete", () => {
-  it("문항별 정답 3개와 학생별 유창성이 모두 있어야 완료된다", () => {
+  it("Hint를 사용하지 않아도 문항별 정답 3개와 학생별 유창성만으로 완료된다", () => {
     const scores: Score[] = [
       { questionId: "S1", correct: "O" },
       { questionId: "R1", correct: "X" },
@@ -30,6 +31,27 @@ describe("areScoresComplete", () => {
     expect(areScoresComplete(scores, "O")).toBe(true);
     expect(areScoresComplete([{ ...scores[0], correct: null }, ...scores.slice(1)], "O")).toBe(false);
     expect(areScoresComplete(scores, null)).toBe(false);
+  });
+});
+
+describe("isHintStateValid", () => {
+  const assignedQuestionIds = ["S1", "R1", "R2"];
+
+  it("Hint 문항과 시각이 모두 비어 있으면 정상이다", () => {
+    expect(isHintStateValid(null, null, assignedQuestionIds)).toBe(true);
+  });
+
+  it("Hint를 사용했다면 배정 문항과 사용 시각이 모두 필요하다", () => {
+    expect(
+      isHintStateValid("R1", "2026-06-15T01:00:00.000Z", assignedQuestionIds),
+    ).toBe(true);
+    expect(isHintStateValid("R1", null, assignedQuestionIds)).toBe(false);
+    expect(
+      isHintStateValid(null, "2026-06-15T01:00:00.000Z", assignedQuestionIds),
+    ).toBe(false);
+    expect(
+      isHintStateValid("R9", "2026-06-15T01:00:00.000Z", assignedQuestionIds),
+    ).toBe(false);
   });
 });
 

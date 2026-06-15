@@ -1,6 +1,6 @@
-import type { Exam } from "@/lib/types";
+import type { Exam, Student } from "@/lib/types";
 
-export type SaveType = "CREATE" | "UPDATE" | "FORCE_OVERWRITE";
+export type SaveType = "CREATE" | "UPDATE" | "FORCE_OVERWRITE" | "RESET";
 
 export function hasRevisionConflict(
   baseRevision: number,
@@ -21,4 +21,27 @@ export function storedEndedAt(existing: Exam | null, now: string): string {
 export function saveType(existing: Exam | null, forceOverwrite: boolean): SaveType {
   if (forceOverwrite) return "FORCE_OVERWRITE";
   return existing ? "UPDATE" : "CREATE";
+}
+
+export function resetHistoryExam(existing: Exam, now: string): Exam {
+  return {
+    ...existing,
+    updatedAt: now,
+    revision: nextRevision(existing.revision),
+  };
+}
+
+export function serializeResetRecord(
+  student: Student,
+  revision: number,
+): (string | number)[] {
+  return [
+    "",
+    student.studentId,
+    student.className,
+    student.number,
+    student.name,
+    ...Array<string>(14).fill(""),
+    revision,
+  ];
 }

@@ -24,6 +24,19 @@ export function areScoresComplete(scores: Score[], fluency: Mark): boolean {
   );
 }
 
+export function isHintStateValid(
+  hintQuestionId: string | null,
+  hintAt: string | null,
+  assignedQuestionIds: string[],
+): boolean {
+  if (hintQuestionId === null && hintAt === null) return true;
+  return Boolean(
+    hintQuestionId &&
+      hintAt &&
+      assignedQuestionIds.includes(hintQuestionId),
+  );
+}
+
 export function deriveStudentFluency(values: Mark[]): Mark {
   const recorded = values.filter(isMark);
   if (recorded.length === 0) return null;
