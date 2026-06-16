@@ -6,6 +6,7 @@ import { Dashboard } from "@/components/dashboard";
 import { ExamView } from "@/components/exam-view";
 import { LoginView } from "@/components/login-view";
 import { QuestionChooser } from "@/components/question-chooser";
+import { ScoreResultView } from "@/components/score-result-view";
 import {
   DRAFT_STORAGE_KEY,
   LEGACY_DRAFT_STORAGE_KEY,
@@ -29,6 +30,8 @@ export function OralExamApp() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [data, setData] = useState<BootstrapData | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [selectedClass, setSelectedClass] = useState("2-1");
+  const [scoreResultExam, setScoreResultExam] = useState<Exam | null>(null);
   const [drafts, setDrafts] = useState<ExamDrafts>(readBrowserDrafts);
   const [conflict, setConflict] = useState<ExamConflict | null>(null);
   const [resettingStudentId, setResettingStudentId] = useState<string | null>(null);
@@ -122,6 +125,7 @@ export function OralExamApp() {
     await fetch("/api/auth/logout", { method: "POST" });
     setData(null);
     setSelectedStudent(null);
+    setScoreResultExam(null);
     setConflict(null);
     setAuthenticated(false);
   }
@@ -129,6 +133,8 @@ export function OralExamApp() {
   function selectStudent(student: Student) {
     setError("");
     setConflict(null);
+    setScoreResultExam(null);
+    setSelectedClass(student.className);
     setSelectedStudent(student);
   }
 
@@ -200,6 +206,9 @@ export function OralExamApp() {
       });
       replaceSavedExam(saved);
       removeDraft(saved.studentId);
+      setSelectedClass(saved.className);
+      setSelectedStudent(null);
+      setScoreResultExam(saved);
       setConflict(null);
     } catch (saveError) {
       if (saveError instanceof ApiRequestError && saveError.code === "VERSION_CONFLICT") {
@@ -234,6 +243,14 @@ export function OralExamApp() {
     const count = Object.keys(drafts).length;
     if (!count || !window.confirm(`이 기기에 저장된 초안 ${count}개를 모두 삭제하시겠습니까?`)) return;
     setDrafts({});
+    setConflict(null);
+    setError("");
+  }
+
+  function goHomeFromScore() {
+    if (scoreResultExam) setSelectedClass(scoreResultExam.className);
+    setScoreResultExam(null);
+    setSelectedStudent(null);
     setConflict(null);
     setError("");
   }
@@ -356,6 +373,10 @@ export function OralExamApp() {
   if (authenticated === null) return <main className="loading">평가 데이터를 확인하고 있습니다...</main>;
   if (!authenticated || !visibleData) return <LoginView busy={busy} error={error} onLogin={login} />;
 
+  if (scoreResultExam) {
+    return <ScoreResultView exam={scoreResultExam} onHome={goHomeFromScore} />;
+  }
+
   const draft = activeDraft();
   const saved = savedExam();
   const exam = draft?.exam ?? saved;
@@ -417,8 +438,10 @@ export function OralExamApp() {
       data={visibleData}
       draftCount={Object.keys(drafts).length}
       error={error}
+      selectedClass={selectedClass}
       resettingStudentId={resettingStudentId}
       onClearDrafts={clearAllDrafts}
+      onSelectClass={setSelectedClass}
       onResetStudent={resetStudentRecord}
       onSelectStudent={selectStudent}
       onLogout={logout}

@@ -8,8 +8,10 @@ export function Dashboard({
   data,
   draftCount,
   error,
+  selectedClass,
   resettingStudentId,
   onClearDrafts,
+  onSelectClass,
   onResetStudent,
   onSelectStudent,
   onLogout,
@@ -17,13 +19,14 @@ export function Dashboard({
   data: BootstrapData;
   draftCount: number;
   error: string;
+  selectedClass: string;
   resettingStudentId: string | null;
   onClearDrafts: () => void;
+  onSelectClass: (className: string) => void;
   onResetStudent: (student: Student) => void;
   onSelectStudent: (student: Student) => void;
   onLogout: () => void;
 }) {
-  const [selectedClass, setSelectedClass] = useState(data.progress[0]?.className ?? "2-1");
   const [query, setQuery] = useState("");
   const examByStudent = useMemo(
     () => new Map(data.exams.map((exam) => [exam.studentId, exam])),
@@ -61,7 +64,7 @@ export function Dashboard({
             className={`card progress-card ${selectedClass === progress.className ? "active" : ""}`}
             key={progress.className}
             type="button"
-            onClick={() => setSelectedClass(progress.className)}
+            onClick={() => onSelectClass(progress.className)}
           >
             <strong>{progress.className}</strong>
             <span>{progress.completed}/{progress.total}</span>

@@ -8,7 +8,7 @@ import { google, type sheets_v4 } from "googleapis";
 import { deriveStudentFluency } from "../src/lib/exam-rules";
 import type { Mark } from "../src/lib/types";
 
-const TARGET_SHEETS = ["학생명렬", "문항목록", "평가기록", "평가이력", "진행현황", "설정"] as const;
+const TARGET_SHEETS = ["학생명렬", "문항목록", "평가기록", "평가이력", "점수현황", "진행현황", "설정"] as const;
 
 const QUESTIONS = [
   {
@@ -120,6 +120,24 @@ const EXAM_HEADERS = [
   "revision",
 ];
 const HISTORY_HEADERS = ["saveId", "저장시각", "저장유형", ...EXAM_HEADERS];
+const SCORE_HEADERS = [
+  "studentId",
+  "반",
+  "번호",
+  "이름",
+  "상태",
+  "유창성",
+  "유창성점수",
+  "선택형정답",
+  "선택형점수",
+  "무작위1정답",
+  "무작위2정답",
+  "무작위정답수",
+  "무작위점수",
+  "총점",
+  "종료시각",
+  "수정시각",
+];
 
 function mark(value: unknown): "O" | "X" | "" {
   return value === "O" || value === "X" ? value : "";
@@ -197,6 +215,34 @@ function fixedExamRow(
   ];
 }
 
+function scoreSummaryRow(
+  student: (string | number | boolean)[],
+  row: number,
+): (string | number | boolean)[] {
+  return [
+    student[0],
+    literalText(student[1]),
+    student[2],
+    student[3],
+    `=IF('평가기록'!R${row}="COMPLETED","COMPLETED","")`,
+    `=IF($E${row}="COMPLETED",'평가기록'!P${row},"")`,
+    `=IF($E${row}="COMPLETED",IF($F${row}="O",30,IF($F${row}="X",20,"")),"")`,
+    `=IF($E${row}="COMPLETED",'평가기록'!M${row},"")`,
+    `=IF($E${row}="COMPLETED",IF($H${row}="O",30,IF($H${row}="X",20,"")),"")`,
+    `=IF($E${row}="COMPLETED",'평가기록'!N${row},"")`,
+    `=IF($E${row}="COMPLETED",'평가기록'!O${row},"")`,
+    `=IF($E${row}="COMPLETED",COUNTIF($J${row}:$K${row},"O"),"")`,
+    `=IF($E${row}="COMPLETED",IF($L${row}=2,40,IF($L${row}=1,30,20)),"")`,
+    `=IF($E${row}="COMPLETED",SUM($G${row},$I${row},$M${row}),"")`,
+    `=IF($E${row}="COMPLETED",'평가기록'!J${row},"")`,
+    `=IF($E${row}="COMPLETED",'평가기록'!S${row},"")`,
+  ];
+}
+
+function literalText(value: unknown): string {
+  return `'${String(value ?? "")}`;
+}
+
 function validRevision(value: unknown): number {
   const number = Number(value);
   return Number.isInteger(number) && number >= 0 ? number : 0;
@@ -230,11 +276,15 @@ async function readRoster(path: string): Promise<(string | number | boolean)[][]
   if (!sheet) throw new Error("'전체 명렬' 시트를 찾을 수 없습니다.");
 
   const students: (string | number | boolean)[][] = [];
-  for (let column = 1; column <= 20; column += 2) {
+  for (let column = 1; column <= sheet.columnCount; column += 3) {
     const className = sheet.getCell(1, column).text.trim();
+    const numberHeader = sheet.getCell(2, column).text.trim();
+    const nameHeader = sheet.getCell(2, column + 1).text.trim();
+    if (!/^2-\d+$/.test(className) || numberHeader !== "번호" || nameHeader !== "이름") continue;
     for (let row = 3; row <= sheet.rowCount; row += 1) {
       const studentId = sheet.getCell(row, column).text.trim();
       const name = sheet.getCell(row, column + 1).text.trim();
+      if (!/^\d{5}$/.test(studentId)) continue;
       if (!studentId || !name) continue;
       students.push([studentId, className, Number(studentId.slice(-2)), name, true]);
     }
@@ -274,12 +324,13 @@ async function replaceValues(
   spreadsheetId: string,
   sheetName: string,
   values: (string | number | boolean)[][],
+  valueInputOption: "RAW" | "USER_ENTERED" = "RAW",
 ): Promise<void> {
   await sheets.spreadsheets.values.clear({ spreadsheetId, range: `${sheetName}!A:Z` });
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${sheetName}!A1`,
-    valueInputOption: "USER_ENTERED",
+    valueInputOption,
     requestBody: { values },
   });
 }
@@ -423,6 +474,64 @@ async function formatSheets(
       },
     );
   }
+  const scoreSheetId = ids.get("점수현황");
+  if (scoreSheetId !== undefined) {
+    requests.push(
+      {
+        setBasicFilter: {
+          filter: {
+            range: {
+              sheetId: scoreSheetId,
+              startRowIndex: 0,
+              endRowIndex: 239,
+              startColumnIndex: 0,
+              endColumnIndex: SCORE_HEADERS.length,
+            },
+          },
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId: scoreSheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SCORE_HEADERS.length },
+          properties: { pixelSize: 112 },
+          fields: "pixelSize",
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId: scoreSheetId, dimension: "COLUMNS", startIndex: 13, endIndex: 14 },
+          properties: { pixelSize: 92 },
+          fields: "pixelSize",
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId: scoreSheetId, dimension: "COLUMNS", startIndex: 14, endIndex: 16 },
+          properties: { pixelSize: 168 },
+          fields: "pixelSize",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId: scoreSheetId, startRowIndex: 1, startColumnIndex: 4, endColumnIndex: 14 },
+          cell: { userEnteredFormat: { horizontalAlignment: "CENTER" } },
+          fields: "userEnteredFormat.horizontalAlignment",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId: scoreSheetId, startRowIndex: 1, startColumnIndex: 13, endColumnIndex: 14 },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.91, green: 0.96, blue: 1 },
+              textFormat: { bold: true },
+            },
+          },
+          fields: "userEnteredFormat(backgroundColor,textFormat)",
+        },
+      },
+    );
+  }
   await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
 }
 
@@ -473,6 +582,10 @@ async function main(): Promise<void> {
     EXAM_HEADERS,
     ...students.map((student) => fixedExamRow(student, latestExamRows.get(String(student[0])))),
   ]);
+  await replaceValues(sheets, spreadsheetId, "점수현황", [
+    SCORE_HEADERS,
+    ...students.map((student, index) => scoreSummaryRow(student, index + 2)),
+  ], "USER_ENTERED");
 
   const historyValuesResponse = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -501,7 +614,7 @@ async function main(): Promise<void> {
     const row = index + 2;
     const className = `2-${index + 1}`;
     return [
-      className,
+      literalText(className),
       `=COUNTIF('학생명렬'!B:B,A${row})`,
       `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!R:R,"COMPLETED")`,
       `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!R:R,"IN_PROGRESS")`,
@@ -514,7 +627,7 @@ async function main(): Promise<void> {
   await replaceValues(sheets, spreadsheetId, "진행현황", [
     ["반", "전체", "완료", "진행 중", "미평가", "정답 O", "유창성 O", "Hint 사용"],
     ...progressRows,
-  ]);
+  ], "USER_ENTERED");
   await formatSheets(sheets, spreadsheetId, ids);
   const historySheetId = ids.get("평가이력");
   if (historySheetId !== undefined) {
