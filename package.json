@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "setup:sheet": "tsx scripts/setup-sheet.ts"
+    "setup:sheet": "tsx scripts/setup-sheet.ts",
+    "sync:stats": "tsx scripts/sync-score-statistics.ts"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

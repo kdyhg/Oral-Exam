@@ -8,7 +8,16 @@ import { google, type sheets_v4 } from "googleapis";
 import { deriveStudentFluency } from "../src/lib/exam-rules";
 import type { Mark } from "../src/lib/types";
 
-const TARGET_SHEETS = ["학생명렬", "문항목록", "평가기록", "평가이력", "점수현황", "진행현황", "설정"] as const;
+const TARGET_SHEETS = [
+  "학생명렬",
+  "문항목록",
+  "평가기록",
+  "평가이력",
+  "점수현황",
+  "점수통계",
+  "진행현황",
+  "설정",
+] as const;
 
 const QUESTIONS = [
   {
@@ -138,6 +147,25 @@ const SCORE_HEADERS = [
   "종료시각",
   "수정시각",
 ];
+const SCORE_STATISTICS_HEADERS = [
+  "반",
+  "전체",
+  "완료",
+  "미평가",
+  "완료율",
+  "평균",
+  "최고점",
+  "최저점",
+  "100점",
+  "90점",
+  "80점",
+  "70점",
+  "60점",
+  "유창성 O",
+  "선택형 O",
+  "무작위 2개 O",
+  "Hint 사용",
+];
 
 function mark(value: unknown): "O" | "X" | "" {
   return value === "O" || value === "X" ? value : "";
@@ -237,6 +265,71 @@ function scoreSummaryRow(
     `=IF($E${row}="COMPLETED",'평가기록'!J${row},"")`,
     `=IF($E${row}="COMPLETED",'평가기록'!S${row},"")`,
   ];
+}
+
+function scoreStatisticsRows(): (string | number | boolean)[][] {
+  const classRows = Array.from({ length: 10 }, (_, index) => {
+    const row = index + 2;
+    const className = `2-${index + 1}`;
+    return scoreStatisticsClassRow(literalText(className), row);
+  });
+  return [
+    SCORE_STATISTICS_HEADERS,
+    ...classRows,
+    scoreStatisticsTotalRow(12),
+  ];
+}
+
+function scoreStatisticsClassRow(className: string, row: number): (string | number | boolean)[] {
+  return [
+    className,
+    `=COUNTIF('점수현황'!$B$2:$B$239,$A${row})`,
+    `=COUNTIFS('점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED")`,
+    `=B${row}-C${row}`,
+    `=IF(B${row}=0,"",C${row}/B${row})`,
+    `=IF(C${row}=0,"",ROUND(AVERAGEIFS('점수현황'!$N$2:$N$239,'점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED"),1))`,
+    `=IF(C${row}=0,"",MAXIFS('점수현황'!$N$2:$N$239,'점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED"))`,
+    `=IF(C${row}=0,"",MINIFS('점수현황'!$N$2:$N$239,'점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED"))`,
+    scoreCountFormula(row, 100),
+    scoreCountFormula(row, 90),
+    scoreCountFormula(row, 80),
+    scoreCountFormula(row, 70),
+    scoreCountFormula(row, 60),
+    `=COUNTIFS('점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$F$2:$F$239,"O")`,
+    `=COUNTIFS('점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$H$2:$H$239,"O")`,
+    `=COUNTIFS('점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$L$2:$L$239,2)`,
+    `=COUNTIFS('평가기록'!$C$2:$C$239,$A${row},'평가기록'!$K$2:$K$239,"?*")`,
+  ];
+}
+
+function scoreStatisticsTotalRow(row: number): (string | number | boolean)[] {
+  return [
+    literalText("전체"),
+    `=COUNTA('점수현황'!$A$2:$A$239)`,
+    `=COUNTIF('점수현황'!$E$2:$E$239,"COMPLETED")`,
+    `=B${row}-C${row}`,
+    `=IF(B${row}=0,"",C${row}/B${row})`,
+    `=IF(C${row}=0,"",ROUND(AVERAGEIF('점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$N$2:$N$239),1))`,
+    `=IF(C${row}=0,"",MAXIFS('점수현황'!$N$2:$N$239,'점수현황'!$E$2:$E$239,"COMPLETED"))`,
+    `=IF(C${row}=0,"",MINIFS('점수현황'!$N$2:$N$239,'점수현황'!$E$2:$E$239,"COMPLETED"))`,
+    totalScoreCountFormula(100),
+    totalScoreCountFormula(90),
+    totalScoreCountFormula(80),
+    totalScoreCountFormula(70),
+    totalScoreCountFormula(60),
+    `=COUNTIFS('점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$F$2:$F$239,"O")`,
+    `=COUNTIFS('점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$H$2:$H$239,"O")`,
+    `=COUNTIFS('점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$L$2:$L$239,2)`,
+    `=COUNTIF('평가기록'!$K$2:$K$239,"?*")`,
+  ];
+}
+
+function scoreCountFormula(row: number, score: number): string {
+  return `=COUNTIFS('점수현황'!$B$2:$B$239,$A${row},'점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$N$2:$N$239,${score})`;
+}
+
+function totalScoreCountFormula(score: number): string {
+  return `=COUNTIFS('점수현황'!$E$2:$E$239,"COMPLETED",'점수현황'!$N$2:$N$239,${score})`;
 }
 
 function literalText(value: unknown): string {
@@ -532,6 +625,57 @@ async function formatSheets(
       },
     );
   }
+  const statisticsSheetId = ids.get("점수통계");
+  if (statisticsSheetId !== undefined) {
+    requests.push(
+      {
+        setBasicFilter: {
+          filter: {
+            range: {
+              sheetId: statisticsSheetId,
+              startRowIndex: 0,
+              endRowIndex: 12,
+              startColumnIndex: 0,
+              endColumnIndex: SCORE_STATISTICS_HEADERS.length,
+            },
+          },
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId: statisticsSheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SCORE_STATISTICS_HEADERS.length },
+          properties: { pixelSize: 104 },
+          fields: "pixelSize",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId: statisticsSheetId, startRowIndex: 1, startColumnIndex: 4, endColumnIndex: 5 },
+          cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.0%" } } },
+          fields: "userEnteredFormat.numberFormat",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId: statisticsSheetId, startRowIndex: 1, startColumnIndex: 5, endColumnIndex: 8 },
+          cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.0" } } },
+          fields: "userEnteredFormat.numberFormat",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId: statisticsSheetId, startRowIndex: 11, endRowIndex: 12, startColumnIndex: 0, endColumnIndex: SCORE_STATISTICS_HEADERS.length },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.91, green: 0.96, blue: 1 },
+              textFormat: { bold: true },
+            },
+          },
+          fields: "userEnteredFormat(backgroundColor,textFormat)",
+        },
+      },
+    );
+  }
   await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
 }
 
@@ -586,6 +730,7 @@ async function main(): Promise<void> {
     SCORE_HEADERS,
     ...students.map((student, index) => scoreSummaryRow(student, index + 2)),
   ], "USER_ENTERED");
+  await replaceValues(sheets, spreadsheetId, "점수통계", scoreStatisticsRows(), "USER_ENTERED");
 
   const historyValuesResponse = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -621,7 +766,7 @@ async function main(): Promise<void> {
       `=B${row}-C${row}-D${row}`,
       `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!M:M,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!N:N,"O")+COUNTIFS('평가기록'!C:C,A${row},'평가기록'!O:O,"O")`,
       `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!P:P,"O")`,
-      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!K:K,"<>")`,
+      `=COUNTIFS('평가기록'!C:C,A${row},'평가기록'!K:K,"?*")`,
     ];
   });
   await replaceValues(sheets, spreadsheetId, "진행현황", [
