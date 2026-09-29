@@ -12,11 +12,12 @@ export const LEVEL_LABELS: Record<ExamLevel, string> = {
   OWN: "준비문제",
 };
 
-export const LEVEL_TITLES: Record<ExamLevel, string> = {
-  HIGH: "상 난이도",
-  MID: "중 난이도",
-  LOW: "하 난이도",
-  OWN: "자신이 준비한 문제",
+// 화면에 보이는 난이도 이름입니다.
+export const LEVEL_NAMES: Record<ExamLevel, string> = {
+  HIGH: "상",
+  MID: "중",
+  LOW: "하",
+  OWN: "준비한 문제",
 };
 
 export const OUTCOME_LABELS: Record<Outcome, string> = {

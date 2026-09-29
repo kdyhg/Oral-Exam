@@ -424,7 +424,7 @@ export function OralExamApp() {
   }
 
   if (!round) return <RoundSelectView onEnter={enterRound} />;
-  if (authenticated === null) return <main className="loading">평가 데이터를 확인하고 있습니다...</main>;
+  if (authenticated === null) return <main className="loading">불러오는 중</main>;
   if (!authenticated || !visibleData) {
     return (
       <LoginView
@@ -492,7 +492,6 @@ export function OralExamApp() {
       <LevelChooser
         student={selectedStudent}
         questions={visibleData.questions}
-        durationSeconds={visibleData.settings.durationSeconds}
         onBack={() => setSelectedStudent(null)}
         onChoose={startExam}
       />
