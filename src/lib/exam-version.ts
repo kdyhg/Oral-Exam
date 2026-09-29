@@ -1,4 +1,4 @@
-import type { Exam, Student } from "@/lib/types";
+import type { Exam } from "./types";
 
 export type SaveType = "CREATE" | "UPDATE" | "FORCE_OVERWRITE" | "RESET";
 
@@ -31,17 +31,3 @@ export function resetHistoryExam(existing: Exam, now: string): Exam {
   };
 }
 
-export function serializeResetRecord(
-  student: Student,
-  revision: number,
-): (string | number)[] {
-  return [
-    "",
-    student.studentId,
-    student.className,
-    student.number,
-    student.name,
-    ...Array<string>(14).fill(""),
-    revision,
-  ];
-}

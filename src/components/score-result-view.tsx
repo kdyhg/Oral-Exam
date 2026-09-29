@@ -1,6 +1,7 @@
 "use client";
 
-import { calculateExamScore } from "@/lib/scoring";
+import { LEVEL_TITLES, OUTCOME_LABELS } from "@/lib/labels";
+import { MAX_SCORE, REDRAW_PENALTY } from "@/lib/scoring";
 import type { Exam } from "@/lib/types";
 
 export function ScoreResultView({
@@ -10,15 +11,15 @@ export function ScoreResultView({
   exam: Exam;
   onHome: () => void;
 }) {
-  const score = calculateExamScore(exam);
+  const redrawn = Boolean(exam.redrawQuestionId);
 
   return (
     <main className="shell result-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">f(x)</div>
+          <div className="brand-mark">f′(x)</div>
           <div>
-            <h1>평가 결과</h1>
+            <h1>{exam.round}차 평가 결과</h1>
             <p>Google Sheet 저장이 완료되었습니다.</p>
           </div>
         </div>
@@ -33,65 +34,34 @@ export function ScoreResultView({
           <h2>{exam.name}</h2>
           <span>수정시각 {formatDateTime(exam.updatedAt)}</span>
         </div>
-        <div className="total-score" aria-label="총점">
-          <strong>{score ? score.total : "-"}</strong>
-          <span>/ 100점</span>
+        <div className="total-score" aria-label="점수">
+          <strong>{exam.score ?? "-"}</strong>
+          <span>/ {MAX_SCORE}점</span>
         </div>
       </section>
 
-      {score ? (
-        <section className="score-breakdown" aria-label="점수 세부 항목">
-          <ScorePart
-            title="유창성"
-            mark={score.fluency}
-            points={score.fluencyScore}
-            description="O 30점 · X 20점"
-          />
-          <ScorePart
-            title="선택형 문제"
-            mark={score.selfCorrect}
-            points={score.selfScore}
-            description="O 30점 · X 20점"
-          />
-          <ScorePart
-            title="무작위 문제"
-            mark={`${score.randomCorrect[0]} / ${score.randomCorrect[1]}`}
-            points={score.randomScore}
-            description={`정답 ${score.randomCorrectCount}개 · 2개 40점, 1개 30점, 0개 20점`}
-          />
-        </section>
-      ) : (
-        <div className="notice error">점수 계산에 필요한 완료 기록을 확인하지 못했습니다.</div>
-      )}
+      <section className="score-breakdown" aria-label="점수 세부 항목">
+        <ScorePart title="선택 난이도" value={LEVEL_TITLES[exam.level]} />
+        <ScorePart
+          title="다시 뽑기"
+          value={exam.level === "OWN" ? "해당 없음" : redrawn ? `사용 (−${REDRAW_PENALTY}점)` : "사용 안 함"}
+        />
+        <ScorePart title="결과" value={exam.outcome ? OUTCOME_LABELS[exam.outcome] : "-"} />
+      </section>
 
       <section className="card result-note">
         <strong>점수는 점수현황 Sheet에서도 확인할 수 있습니다.</strong>
-        <span>완료 기록을 수정하거나 초기화하면 Sheet 점수도 공식 기록 기준으로 함께 바뀝니다.</span>
+        <span>차수별 평가 영역 만점은 50점, 기본점수는 30점입니다. 완료 기록을 수정하거나 초기화하면 Sheet 점수도 함께 바뀝니다.</span>
       </section>
     </main>
   );
 }
 
-function ScorePart({
-  title,
-  mark,
-  points,
-  description,
-}: {
-  title: string;
-  mark: string;
-  points: number;
-  description: string;
-}) {
+function ScorePart({ title, value }: { title: string; value: string }) {
   return (
     <article className="card score-part">
       <p>{title}</p>
-      <div>
-        <strong>{points}</strong>
-        <span>점</span>
-      </div>
-      <em>{mark}</em>
-      <small>{description}</small>
+      <em>{value}</em>
     </article>
   );
 }
@@ -105,3 +75,4 @@ function formatDateTime(value: string): string {
     timeStyle: "short",
   });
 }
+

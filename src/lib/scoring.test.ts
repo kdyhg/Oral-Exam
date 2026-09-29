@@ -1,74 +1,32 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateExamScore } from "./scoring";
-import type { Exam } from "./types";
+import { calculateScore, outcomeOptions } from "./scoring";
 
-const completedExam = {
-  status: "COMPLETED",
-  fluency: "O",
-  scores: [
-    { questionId: "S1", correct: "O" },
-    { questionId: "R1", correct: "O" },
-    { questionId: "R2", correct: "O" },
-  ],
-} as Exam;
-
-describe("calculateExamScore", () => {
-  it("전체 O이면 100점을 계산한다", () => {
-    expect(calculateExamScore(completedExam)).toMatchObject({
-      fluencyScore: 30,
-      selfScore: 30,
-      randomCorrectCount: 2,
-      randomScore: 40,
-      total: 100,
-    });
+describe("calculateScore", () => {
+  it("처음 뽑은 문제를 해결하면 난이도별 점수를 준다", () => {
+    expect(calculateScore("HIGH", false, "SOLVED")).toBe(50);
+    expect(calculateScore("MID", false, "SOLVED")).toBe(47);
+    expect(calculateScore("LOW", false, "SOLVED")).toBe(44);
+    expect(calculateScore("OWN", false, "SOLVED")).toBe(41);
   });
 
-  it("유창성 X, 선택형 X, 무작위 O 1개를 기준대로 계산한다", () => {
-    expect(
-      calculateExamScore({
-        ...completedExam,
-        fluency: "X",
-        scores: [
-          { questionId: "S1", correct: "X" },
-          { questionId: "R1", correct: "O" },
-          { questionId: "R2", correct: "X" },
-        ],
-      }),
-    ).toMatchObject({
-      fluencyScore: 20,
-      selfScore: 20,
-      randomCorrectCount: 1,
-      randomScore: 30,
-      total: 70,
-    });
+  it("다시 뽑아 해결하면 한 단계(3점) 낮은 점수를 준다", () => {
+    expect(calculateScore("HIGH", true, "SOLVED")).toBe(47);
+    expect(calculateScore("MID", true, "SOLVED")).toBe(44);
+    expect(calculateScore("LOW", true, "SOLVED")).toBe(41);
   });
 
-  it("무작위 두 문항이 모두 X이면 무작위 점수는 20점이다", () => {
-    expect(
-      calculateExamScore({
-        ...completedExam,
-        scores: [
-          { questionId: "S1", correct: "O" },
-          { questionId: "R1", correct: "X" },
-          { questionId: "R2", correct: "X" },
-        ],
-      }),
-    ).toMatchObject({ randomCorrectCount: 0, randomScore: 20, total: 80 });
+  it("해결하지 못하면 38점, 시도하지 않으면 기본점수 30점이다", () => {
+    for (const level of ["HIGH", "MID", "LOW", "OWN"] as const) {
+      for (const redrawn of [false, true]) {
+        expect(calculateScore(level, redrawn, "FAILED")).toBe(38);
+        expect(calculateScore(level, redrawn, "NO_ATTEMPT")).toBe(30);
+      }
+    }
   });
 
-  it("완료 전이거나 필수 O/X가 빠지면 점수를 표시하지 않는다", () => {
-    expect(calculateExamScore({ ...completedExam, status: "IN_PROGRESS" })).toBeNull();
-    expect(
-      calculateExamScore({
-        ...completedExam,
-        scores: [
-          { questionId: "S1", correct: null },
-          { questionId: "R1", correct: "O" },
-          { questionId: "R2", correct: "O" },
-        ],
-      }),
-    ).toBeNull();
-    expect(calculateExamScore({ ...completedExam, fluency: null })).toBeNull();
+  it("결과 선택지에 현재 상황의 점수를 보여 준다", () => {
+    expect(outcomeOptions("HIGH", true).map((option) => option.points)).toEqual([47, 38, 30]);
   });
 });
+

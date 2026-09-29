@@ -6,6 +6,7 @@ import type { BootstrapData, Student } from "@/lib/types";
 
 export function Dashboard({
   data,
+  roundLabel,
   draftCount,
   error,
   selectedClass,
@@ -14,9 +15,11 @@ export function Dashboard({
   onSelectClass,
   onResetStudent,
   onSelectStudent,
+  onChangeRound,
   onLogout,
 }: {
   data: BootstrapData;
+  roundLabel: string;
   draftCount: number;
   error: string;
   selectedClass: string;
@@ -25,6 +28,7 @@ export function Dashboard({
   onSelectClass: (className: string) => void;
   onResetStudent: (student: Student) => void;
   onSelectStudent: (student: Student) => void;
+  onChangeRound: () => void;
   onLogout: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -44,13 +48,14 @@ export function Dashboard({
     <main className="shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">f(x)</div>
+          <div className="brand-mark">f′(x)</div>
           <div>
-            <h1>대수 수학개념 도슨트</h1>
-            <p>2026학년도 2학년 1학기 · 구술 수행평가</p>
+            <h1>미적분 수학개념 도슨트 · {roundLabel}</h1>
+            <p>2026학년도 2학년 2학기 · 구술 수행평가</p>
           </div>
         </div>
         <div className="topbar-actions">
+          <button className="button secondary" type="button" onClick={onChangeRound}>차수 선택</button>
           <button className="button secondary" type="button" disabled={!draftCount} onClick={onClearDrafts}>
             모든 초안 삭제{draftCount ? ` (${draftCount})` : ""}
           </button>
@@ -73,7 +78,7 @@ export function Dashboard({
         ))}
       </section>
 
-      {error ? <div className="notice error">{error}</div> : null}
+      {error ? <div className="notice error" role="alert">{error}</div> : null}
 
       <section className="card roster-card">
         <div className="roster-toolbar">

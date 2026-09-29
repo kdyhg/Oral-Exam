@@ -1,19 +1,23 @@
-import type { Exam, ExamDraft } from "@/lib/types";
+import { isExamLevel } from "./exam-rules";
+import type { Round } from "./rounds";
+import type { Exam, ExamDraft } from "./types";
 
-export const DRAFT_STORAGE_KEY = "oral-exam-drafts-v3";
-export const LEGACY_DRAFT_STORAGE_KEY = "oral-exam-drafts-v2";
 export const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type ExamDrafts = Record<string, ExamDraft>;
 
-export function parseDrafts(raw: string | null, now = Date.now()): ExamDrafts {
+export function draftStorageKey(round: Round): string {
+  return `docent-drafts-round${round}-v1`;
+}
+
+export function parseDrafts(raw: string | null, round: Round, now = Date.now()): ExamDrafts {
   if (!raw) return {};
   try {
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     return Object.fromEntries(
       Object.entries(value).flatMap(([studentId, candidate]) => {
-        const draft = normalizeDraft(studentId, candidate);
+        const draft = normalizeDraft(studentId, round, candidate);
         if (!draft || now - Date.parse(draft.touchedAt) >= DRAFT_TTL_MS) return [];
         return [[studentId, draft]];
       }),
@@ -40,43 +44,27 @@ export function pruneExpiredDrafts(drafts: ExamDrafts, now = Date.now()): ExamDr
   return active.length === Object.keys(drafts).length ? drafts : Object.fromEntries(active);
 }
 
-function normalizeDraft(studentId: string, candidate: unknown): ExamDraft | null {
-  if (!studentId || !candidate || typeof candidate !== "object") return null;
-
-  if ("exam" in candidate) {
-    const draft = candidate as Partial<ExamDraft>;
-    if (!isExamDraftValue(studentId, draft.exam)) return null;
-    const touchedAt = validDate(draft.touchedAt) ? draft.touchedAt : draft.exam.updatedAt;
-    if (!validDate(touchedAt)) return null;
-    return {
-      exam: { ...draft.exam, revision: numberOrZero(draft.exam.revision) },
-      baseRevision: numberOrZero(draft.baseRevision),
-      touchedAt,
-    };
+function normalizeDraft(studentId: string, round: Round, candidate: unknown): ExamDraft | null {
+  if (!studentId || !candidate || typeof candidate !== "object" || !("exam" in candidate)) {
+    return null;
   }
-
-  // Preserve valid drafts from the previous storage format during the upgrade.
-  if (!isExamDraftValue(studentId, candidate)) return null;
-  const exam = candidate as Exam;
-  const touchedAt = validDate(exam.updatedAt) ? exam.updatedAt : exam.startedAt;
-  if (!validDate(touchedAt)) return null;
+  const draft = candidate as Partial<ExamDraft>;
+  const exam = draft.exam;
+  if (
+    !exam ||
+    typeof exam !== "object" ||
+    exam.studentId !== studentId ||
+    exam.round !== round ||
+    !isExamLevel(exam.level) ||
+    !validDate(draft.touchedAt)
+  ) {
+    return null;
+  }
   return {
     exam: { ...exam, revision: numberOrZero(exam.revision) },
-    baseRevision: numberOrZero(exam.revision),
-    touchedAt,
+    baseRevision: numberOrZero(draft.baseRevision),
+    touchedAt: draft.touchedAt,
   };
-}
-
-function isExamDraftValue(studentId: string, value: unknown): value is Exam {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      "studentId" in value &&
-      value.studentId === studentId &&
-      "scores" in value &&
-      Array.isArray(value.scores) &&
-      value.scores.length === 3,
-  );
 }
 
 function validDate(value: unknown): value is string {
@@ -86,3 +74,4 @@ function validDate(value: unknown): value is string {
 function numberOrZero(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
 }
+

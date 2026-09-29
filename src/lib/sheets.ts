@@ -2,43 +2,48 @@ import { randomUUID } from "node:crypto";
 
 import { google, type sheets_v4 } from "googleapis";
 
-import {
-  areScoresComplete,
-  buildClassProgress,
-  deriveStudentFluency,
-  isHintStateValid,
-  isMark,
-} from "@/lib/exam-rules";
+import { InputError } from "@/lib/api";
+import { difficultyFromLabel } from "@/lib/labels";
+import { buildClassProgress, examStructureError } from "@/lib/exam-rules";
 import {
   hasRevisionConflict,
   nextRevision,
   resetHistoryExam,
   saveType,
-  serializeResetRecord,
   storedEndedAt,
   type SaveType,
 } from "@/lib/exam-version";
+import { recordSheetName, roundLabel, type Round } from "@/lib/rounds";
+import { calculateScore } from "@/lib/scoring";
+import {
+  HISTORY_SHEET,
+  QUESTIONS_SHEET,
+  RECORD_COLUMN_COUNT,
+  ROSTER_SHEET,
+  SETTINGS_SHEET,
+  a1,
+  blankRecordRow,
+  cellText,
+  hasRecordHeader,
+  historyRow,
+  parseRecordRow,
+  recordRevision,
+  serializeExam,
+  type SheetCell,
+} from "@/lib/sheet-schema";
 import type {
   AppSettings,
   BootstrapData,
   Exam,
   ExamResetResult,
   ExamSubmission,
-  Mark,
   Question,
-  Score,
   Student,
 } from "@/lib/types";
 
-const ROSTER_SHEET = "학생명렬";
-const QUESTIONS_SHEET = "문항목록";
-const EXAMS_SHEET = "평가기록";
-const HISTORY_SHEET = "평가이력";
-const SETTINGS_SHEET = "설정";
-const DEFAULT_SETTINGS: AppSettings = { durationSeconds: 360, warningSeconds: 60 };
+const DEFAULT_SETTINGS: AppSettings = { durationSeconds: 240, warningSeconds: 60 };
 
-type ExamRow = { exam: Exam | null; studentId: string; rowNumber: number; revision: number };
-type ExamSheetSchema = "legacy" | "current" | "versioned";
+type RecordRow = { exam: Exam | null; studentId: string; rowNumber: number; revision: number };
 
 export class ExamConflictError extends Error {
   readonly code = "VERSION_CONFLICT";
@@ -72,81 +77,6 @@ function getClient(): { sheets: sheets_v4.Sheets; spreadsheetId: string } {
   };
 }
 
-function text(row: unknown[], index: number): string {
-  return String(row[index] ?? "").trim();
-}
-
-function mark(row: unknown[], index: number): Mark {
-  const value = text(row, index);
-  return value === "O" || value === "X" ? value : null;
-}
-
-function revision(row: unknown[], schema: ExamSheetSchema): number {
-  if (schema !== "versioned") return text(row, 0) ? 1 : 0;
-  const value = Number(row[19]);
-  return Number.isInteger(value) && value >= 0 ? value : 0;
-}
-
-function parseExam(row: unknown[], schema: ExamSheetSchema): Exam | null {
-  if (!text(row, 0)) return null;
-  const questionIds = [text(row, 5), text(row, 6), text(row, 7)] as [
-    string,
-    string,
-    string,
-  ];
-  const legacy = schema === "legacy";
-  return {
-    examId: text(row, 0),
-    studentId: text(row, 1),
-    className: text(row, 2),
-    number: Number(row[3]),
-    name: text(row, 4),
-    selfQuestionId: questionIds[0],
-    randomQuestionIds: [questionIds[1], questionIds[2]],
-    startedAt: text(row, 8),
-    endedAt: text(row, 9) || null,
-    hintQuestionId: text(row, 10) || null,
-    hintAt: text(row, 11) || null,
-    scores: [
-      { questionId: questionIds[0], correct: mark(row, 12) },
-      { questionId: questionIds[1], correct: mark(row, legacy ? 14 : 13) },
-      { questionId: questionIds[2], correct: mark(row, legacy ? 16 : 14) },
-    ],
-    fluency: legacy
-      ? deriveStudentFluency([mark(row, 13), mark(row, 15), mark(row, 17)])
-      : mark(row, 15),
-    memo: text(row, legacy ? 18 : 16),
-    status: text(row, legacy ? 19 : 17) === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS",
-    updatedAt: text(row, legacy ? 20 : 18),
-    revision: revision(row, schema),
-  };
-}
-
-function serializeExam(exam: Exam): (string | number)[] {
-  return [
-    exam.examId,
-    exam.studentId,
-    exam.className,
-    exam.number,
-    exam.name,
-    exam.selfQuestionId,
-    exam.randomQuestionIds[0],
-    exam.randomQuestionIds[1],
-    exam.startedAt,
-    exam.endedAt ?? "",
-    exam.hintQuestionId ?? "",
-    exam.hintAt ?? "",
-    exam.scores[0].correct ?? "",
-    exam.scores[1].correct ?? "",
-    exam.scores[2].correct ?? "",
-    exam.fluency ?? "",
-    exam.memo,
-    exam.status,
-    exam.updatedAt,
-    exam.revision,
-  ];
-}
-
 async function readRange(range: string): Promise<unknown[][]> {
   const { sheets, spreadsheetId } = getClient();
   const response = await sheets.spreadsheets.values.get({ spreadsheetId, range });
@@ -154,77 +84,76 @@ async function readRange(range: string): Promise<unknown[][]> {
 }
 
 async function readStudents(): Promise<Student[]> {
-  const rows = await readRange(`${ROSTER_SHEET}!A2:E`);
+  const rows = await readRange(a1(ROSTER_SHEET, "A2:E"));
   return rows
-    .filter((row) => text(row, 0) && text(row, 3))
+    .filter((row) => cellText(row, 0) && cellText(row, 3))
     .map((row) => ({
-      studentId: text(row, 0),
-      className: text(row, 1),
+      studentId: cellText(row, 0),
+      className: cellText(row, 1),
       number: Number(row[2]),
-      name: text(row, 3),
-      active: text(row, 4).toUpperCase() !== "FALSE",
+      name: cellText(row, 3),
+      active: cellText(row, 4).toUpperCase() !== "FALSE",
     }));
 }
 
-async function readQuestions(): Promise<Question[]> {
-  const rows = await readRange(`${QUESTIONS_SHEET}!A2:D`);
-  return rows
-    .filter((row) => text(row, 0))
-    .map((row) => ({
-      id: text(row, 0),
-      type: text(row, 1) === "SELF" ? "SELF" : "RANDOM",
-      title: text(row, 2),
-      prompt: text(row, 3),
-    }));
+async function readQuestions(round: Round): Promise<Question[]> {
+  const rows = await readRange(a1(QUESTIONS_SHEET, "A2:E"));
+  return rows.flatMap((row) => {
+    const difficulty = difficultyFromLabel(cellText(row, 2));
+    if (!cellText(row, 0) || cellText(row, 1) !== roundLabel(round) || !difficulty) return [];
+    return [
+      {
+        id: cellText(row, 0),
+        round,
+        difficulty,
+        title: cellText(row, 3),
+        prompt: cellText(row, 4),
+      },
+    ];
+  });
 }
 
-async function readExamRows(): Promise<{ rows: ExamRow[]; schema: ExamSheetSchema }> {
-  const values = await readRange(`${EXAMS_SHEET}!A1:U`);
-  const header = values[0] ?? [];
-  const schema: ExamSheetSchema =
-    text(header, 19) === "revision"
-      ? "versioned"
-      : text(header, 13).includes("유창성")
-        ? "legacy"
-        : "current";
-  return {
-    schema,
-    rows: values
-      .slice(1)
-      .map((row, index) => ({
-        exam: parseExam(row, schema),
-        studentId: text(row, 1),
-        rowNumber: index + 2,
-        revision: revision(row, schema),
-      }))
-      .filter(({ studentId }) => studentId),
-  };
+async function readRecordRows(round: Round): Promise<RecordRow[]> {
+  const values = await readRange(a1(recordSheetName(round), `A1:${columnLetter(RECORD_COLUMN_COUNT)}`));
+  if (!hasRecordHeader(values[0] ?? [])) {
+    throw new Error(
+      `'${recordSheetName(round)}' Sheet 형식이 올바르지 않습니다. Sheet 설정 도구를 실행해 주세요.`,
+    );
+  }
+  return values
+    .slice(1)
+    .map((row, index) => ({
+      exam: parseRecordRow(row, round),
+      studentId: cellText(row, 1),
+      rowNumber: index + 2,
+      revision: recordRevision(row),
+    }))
+    .filter(({ studentId }) => studentId);
 }
 
 async function readSettings(): Promise<AppSettings> {
-  const rows = await readRange(`${SETTINGS_SHEET}!A2:B`);
-  const values = new Map(rows.map((row) => [text(row, 0), Number(row[1])]));
+  const rows = await readRange(a1(SETTINGS_SHEET, "A2:B"));
+  const values = new Map(rows.map((row) => [cellText(row, 0), Number(row[1])]));
   return {
     durationSeconds: values.get("durationSeconds") || DEFAULT_SETTINGS.durationSeconds,
     warningSeconds: values.get("warningSeconds") || DEFAULT_SETTINGS.warningSeconds,
   };
 }
 
-export async function getBootstrapData(): Promise<BootstrapData> {
-  const [students, questions, examRows, settings] = await Promise.all([
+export async function getBootstrapData(round: Round): Promise<BootstrapData> {
+  const [students, questions, recordRows, settings] = await Promise.all([
     readStudents(),
-    readQuestions(),
-    readExamRows(),
+    readQuestions(round),
+    readRecordRows(round),
     readSettings(),
   ]);
-  const exams = latestExams(examRows.rows);
+  const exams = recordRows.flatMap((row) => (row.exam ? [row.exam] : []));
   return {
+    round,
     students,
     questions,
     exams,
-    recordRevisions: Object.fromEntries(
-      examRows.rows.map((row) => [row.studentId, row.revision]),
-    ),
+    recordRevisions: Object.fromEntries(recordRows.map((row) => [row.studentId, row.revision])),
     settings,
     progress: buildClassProgress(students, exams),
   };
@@ -232,70 +161,71 @@ export async function getBootstrapData(): Promise<BootstrapData> {
 
 export async function submitExam(submission: ExamSubmission): Promise<Exam> {
   const { exam: input, baseRevision, forceOverwrite } = submission;
-  const [students, questions, examRows] = await Promise.all([
+  const round = input.round;
+  const [students, questions, recordRows] = await Promise.all([
     readStudents(),
-    readQuestions(),
-    readExamRows(),
+    readQuestions(round),
+    readRecordRows(round),
   ]);
-  if (examRows.schema !== "versioned") {
-    throw new Error("평가기록 Sheet를 최신 형식으로 마이그레이션한 뒤 저장해 주세요.");
-  }
 
   const student = students.find((item) => item.studentId === input.studentId && item.active);
-  if (!student) throw new Error("활성 학생을 찾을 수 없습니다.");
-  validateExam(input, questions);
+  if (!student) throw new InputError("활성 학생을 찾을 수 없습니다.");
+  const structureError = examStructureError(input, questions);
+  if (structureError) throw new InputError(structureError);
+  if (!input.outcome) throw new InputError("평가 결과를 선택해 주세요.");
 
-  const fixedRow = examRows.rows.find((row) => row.studentId === input.studentId);
+  const fixedRow = recordRows.find((row) => row.studentId === input.studentId);
   if (!fixedRow) {
     throw new Error("학생별 고정 평가 행을 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
   }
   const existing = fixedRow.exam;
-  const currentRevision = fixedRow.revision;
-  if (hasRevisionConflict(baseRevision, currentRevision, forceOverwrite)) {
-    throw new ExamConflictError(existing, currentRevision);
+  if (hasRevisionConflict(baseRevision, fixedRow.revision, forceOverwrite)) {
+    throw new ExamConflictError(existing, fixedRow.revision);
   }
 
   const now = new Date().toISOString();
   const exam: Exam = {
     examId: existing?.examId ?? input.examId ?? randomUUID(),
+    round,
     studentId: student.studentId,
     className: student.className,
     number: student.number,
     name: student.name,
-    selfQuestionId: input.selfQuestionId,
-    randomQuestionIds: input.randomQuestionIds,
+    level: input.level,
+    firstQuestionId: input.firstQuestionId,
+    redrawQuestionId: input.redrawQuestionId,
+    redrawAt: input.redrawQuestionId ? input.redrawAt : null,
     startedAt: existing?.startedAt ?? validDateOr(input.startedAt, now),
     endedAt: storedEndedAt(existing, now),
-    hintQuestionId: input.hintQuestionId,
-    hintAt: input.hintQuestionId && input.hintAt ? input.hintAt : null,
-    scores: input.scores.map((score) => ({
-      questionId: score.questionId,
-      correct: isMark(score.correct) ? score.correct : null,
-    })) as [Score, Score, Score],
-    fluency: input.fluency,
+    outcome: input.outcome,
+    // 점수는 브라우저 값을 믿지 않고 서버에서 평가계획 기준으로 다시 계산합니다.
+    score: calculateScore(input.level, Boolean(input.redrawQuestionId), input.outcome),
     memo: input.memo.slice(0, 1000),
     status: "COMPLETED",
     updatedAt: now,
-    revision: nextRevision(currentRevision),
+    revision: nextRevision(fixedRow.revision),
   };
 
-  await writeExamAndHistory(fixedRow.rowNumber, exam, saveType(existing, forceOverwrite));
+  await writeRecordAndHistory(
+    round,
+    fixedRow.rowNumber,
+    serializeExam(exam),
+    historyRow(randomUUID(), now, saveType(existing, forceOverwrite), round, serializeExam(exam)),
+  );
   return exam;
 }
 
 export async function resetExam(
+  round: Round,
   studentId: string,
   baseRevision: number,
 ): Promise<ExamResetResult> {
-  const [students, examRows] = await Promise.all([readStudents(), readExamRows()]);
-  if (examRows.schema !== "versioned") {
-    throw new Error("평가기록 Sheet를 최신 형식으로 마이그레이션한 뒤 초기화해 주세요.");
-  }
+  const [students, recordRows] = await Promise.all([readStudents(), readRecordRows(round)]);
 
   const student = students.find((item) => item.studentId === studentId && item.active);
-  if (!student) throw new Error("활성 학생을 찾을 수 없습니다.");
+  if (!student) throw new InputError("활성 학생을 찾을 수 없습니다.");
 
-  const fixedRow = examRows.rows.find((row) => row.studentId === studentId);
+  const fixedRow = recordRows.find((row) => row.studentId === studentId);
   if (!fixedRow) {
     throw new Error("학생별 고정 평가 행을 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
   }
@@ -303,114 +233,26 @@ export async function resetExam(
     throw new ExamConflictError(fixedRow.exam, fixedRow.revision);
   }
   if (!fixedRow.exam || fixedRow.exam.status !== "COMPLETED") {
-    throw new Error("초기화할 완료 평가 기록이 없습니다.");
+    throw new InputError("초기화할 완료 평가 기록이 없습니다.");
   }
 
   const now = new Date().toISOString();
   const historyExam = resetHistoryExam(fixedRow.exam, now);
-  await writeResetAndHistory(fixedRow.rowNumber, student, historyExam);
+  await writeRecordAndHistory(
+    round,
+    fixedRow.rowNumber,
+    blankRecordRow(student, historyExam.revision),
+    historyRow(randomUUID(), now, "RESET" satisfies SaveType, round, serializeExam(historyExam)),
+  );
   return { studentId, revision: historyExam.revision };
 }
 
-function validateExam(input: Exam, questions: Question[]): void {
-  const selfQuestion = questions.find(
-    (question) => question.id === input.selfQuestionId && question.type === "SELF",
-  );
-  if (!selfQuestion) throw new Error("올바른 자기선택형 문항을 선택해 주세요.");
-
-  const randomIds = new Set(
-    questions.filter((question) => question.type === "RANDOM").map((question) => question.id),
-  );
-  if (
-    input.randomQuestionIds[0] === input.randomQuestionIds[1] ||
-    !input.randomQuestionIds.every((id) => randomIds.has(id))
-  ) {
-    throw new Error("무작위형 문항 배정을 확인해 주세요.");
-  }
-  const assignedIds = [
-    input.selfQuestionId,
-    input.randomQuestionIds[0],
-    input.randomQuestionIds[1],
-  ];
-  if (
-    input.scores.length !== 3 ||
-    input.scores.some((score, index) => score.questionId !== assignedIds[index]) ||
-    !areScoresComplete(input.scores, input.fluency)
-  ) {
-    throw new Error("정답 여부 3개와 학생별 유창성을 모두 선택해 주세요.");
-  }
-  if (!isHintStateValid(input.hintQuestionId, input.hintAt, assignedIds)) {
-    throw new Error("Hint를 사용했다면 대상 문항과 사용 시각을 함께 기록해 주세요.");
-  }
-}
-
-async function writeExamAndHistory(
+async function writeRecordAndHistory(
+  round: Round,
   rowNumber: number,
-  exam: Exam,
-  historyType: SaveType,
+  record: SheetCell[],
+  history: SheetCell[],
 ): Promise<void> {
-  const { sheets, spreadsheetId, examSheetId, historySheetId } = await getWritableSheets();
-  const history = [randomUUID(), exam.updatedAt, historyType, ...serializeExam(exam)];
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        {
-          updateCells: {
-            range: {
-              sheetId: examSheetId,
-              startRowIndex: rowNumber - 1,
-              endRowIndex: rowNumber,
-              startColumnIndex: 0,
-              endColumnIndex: 20,
-            },
-            rows: [{ values: serializeExam(exam).map(cellData) }],
-            fields: "userEnteredValue",
-          },
-        },
-        ...historyInsertRequests(historySheetId, history),
-      ],
-    },
-  });
-}
-
-async function writeResetAndHistory(
-  rowNumber: number,
-  student: Student,
-  historyExam: Exam,
-): Promise<void> {
-  const { sheets, spreadsheetId, examSheetId, historySheetId } = await getWritableSheets();
-  const resetRow = serializeResetRecord(student, historyExam.revision);
-  const history = [randomUUID(), historyExam.updatedAt, "RESET", ...serializeExam(historyExam)];
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        {
-          updateCells: {
-            range: {
-              sheetId: examSheetId,
-              startRowIndex: rowNumber - 1,
-              endRowIndex: rowNumber,
-              startColumnIndex: 0,
-              endColumnIndex: 20,
-            },
-            rows: [{ values: resetRow.map(cellData) }],
-            fields: "userEnteredValue",
-          },
-        },
-        ...historyInsertRequests(historySheetId, history),
-      ],
-    },
-  });
-}
-
-async function getWritableSheets(): Promise<{
-  sheets: sheets_v4.Sheets;
-  spreadsheetId: string;
-  examSheetId: number;
-  historySheetId: number;
-}> {
   const { sheets, spreadsheetId } = getClient();
   const metadata = await sheets.spreadsheets.get({
     spreadsheetId,
@@ -422,69 +264,72 @@ async function getWritableSheets(): Promise<{
       sheet.properties?.sheetId ?? -1,
     ]),
   );
-  const examSheetId = ids.get(EXAMS_SHEET);
-  const historySheetId = ids.get(HISTORY_SHEET);
-  if (examSheetId === undefined || examSheetId < 0 || historySheetId === undefined || historySheetId < 0) {
+  const recordSheetId = ids.get(recordSheetName(round)) ?? -1;
+  const historySheetId = ids.get(HISTORY_SHEET) ?? -1;
+  if (recordSheetId < 0 || historySheetId < 0) {
     throw new Error("평가기록 또는 평가이력 Sheet를 찾을 수 없습니다. Sheet 설정 도구를 다시 실행해 주세요.");
   }
-  return { sheets, spreadsheetId, examSheetId, historySheetId };
+
+  // 기록 행 갱신과 이력 추가를 한 번의 batchUpdate로 묶어 함께 성공하거나 함께 실패하게 합니다.
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateCells: {
+            range: {
+              sheetId: recordSheetId,
+              startRowIndex: rowNumber - 1,
+              endRowIndex: rowNumber,
+              startColumnIndex: 0,
+              endColumnIndex: record.length,
+            },
+            rows: [{ values: record.map(cellData) }],
+            fields: "userEnteredValue",
+          },
+        },
+        {
+          insertDimension: {
+            range: { sheetId: historySheetId, dimension: "ROWS", startIndex: 1, endIndex: 2 },
+            inheritFromBefore: false,
+          },
+        },
+        {
+          updateCells: {
+            range: {
+              sheetId: historySheetId,
+              startRowIndex: 1,
+              endRowIndex: 2,
+              startColumnIndex: 0,
+              endColumnIndex: history.length,
+            },
+            rows: [{ values: history.map(cellData) }],
+            fields: "userEnteredValue",
+          },
+        },
+      ],
+    },
+  });
 }
 
-function historyInsertRequests(
-  historySheetId: number,
-  history: (string | number)[],
-): sheets_v4.Schema$Request[] {
-  return [
-    {
-      insertDimension: {
-        range: {
-          sheetId: historySheetId,
-          dimension: "ROWS",
-          startIndex: 1,
-          endIndex: 2,
-        },
-        inheritFromBefore: false,
-      },
-    },
-    {
-      updateCells: {
-        range: {
-          sheetId: historySheetId,
-          startRowIndex: 1,
-          endRowIndex: 2,
-          startColumnIndex: 0,
-          endColumnIndex: 23,
-        },
-        rows: [{ values: history.map(cellData) }],
-        fields: "userEnteredValue",
-      },
-    },
-  ];
+function cellData(value: SheetCell): sheets_v4.Schema$CellData {
+  if (typeof value === "number") return { userEnteredValue: { numberValue: value } };
+  if (typeof value === "boolean") return { userEnteredValue: { boolValue: value } };
+  return { userEnteredValue: { stringValue: value } };
 }
 
-function latestExams(rows: ExamRow[]): Exam[] {
-  const latest = new Map<string, Exam>();
-  for (const row of rows) {
-    if (!row.exam) continue;
-    const current = latest.get(row.exam.studentId);
-    if (
-      !current ||
-      row.exam.revision > current.revision ||
-      (row.exam.revision === current.revision && row.exam.updatedAt > current.updatedAt)
-    ) {
-      latest.set(row.exam.studentId, row.exam);
-    }
+function columnLetter(count: number): string {
+  let value = count;
+  let letters = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    letters = String.fromCharCode(65 + remainder) + letters;
+    value = Math.floor((value - 1) / 26);
   }
-  return [...latest.values()];
-}
-
-function cellData(value: string | number): sheets_v4.Schema$CellData {
-  return {
-    userEnteredValue:
-      typeof value === "number" ? { numberValue: value } : { stringValue: value },
-  };
+  return letters;
 }
 
 function validDateOr(value: string, fallback: string): string {
   return Number.isNaN(Date.parse(value)) ? fallback : value;
 }
+

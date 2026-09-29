@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { MarkButtons, QuestionCard } from "@/components/question-card";
-import { applyHint, areScoresComplete } from "@/lib/exam-rules";
-import type { AppSettings, Exam, ExamConflict, Mark, Question } from "@/lib/types";
+import { MathText } from "@/components/math-text";
+import { canRedraw, currentQuestionId, timerStartedAt } from "@/lib/exam-rules";
+import { LEVEL_TITLES } from "@/lib/labels";
+import { calculateScore, outcomeOptions, REDRAW_PENALTY } from "@/lib/scoring";
+import type { AppSettings, Exam, ExamConflict, Outcome, Question } from "@/lib/types";
 
 export function ExamView({
   exam,
@@ -16,6 +18,7 @@ export function ExamView({
   error,
   onBack,
   onChange,
+  onRedraw,
   onDiscard,
   onSubmit,
   onUseLatest,
@@ -30,73 +33,54 @@ export function ExamView({
   error: string;
   onBack: () => void;
   onChange: (exam: Exam) => void;
+  onRedraw: () => void;
   onDiscard?: () => void;
-  onSubmit: (exam: Exam, forceOverwrite?: boolean) => Promise<void>;
+  onSubmit: (exam: Exam) => Promise<void>;
   onUseLatest: () => void;
   onForceSubmit: () => void;
 }) {
-  const [remaining, setRemaining] = useState(() => getRemaining(exam.startedAt, settings.durationSeconds));
-  const warned = useRef(false);
-  const ended = useRef(false);
   const questionById = useMemo(
     () => new Map(questions.map((question) => [question.id, question])),
     [questions],
   );
-
-  useEffect(() => {
-    const update = () => setRemaining(getRemaining(exam.startedAt, settings.durationSeconds));
-    update();
-    const timer = window.setInterval(update, 1000);
-    return () => window.clearInterval(timer);
-  }, [exam.startedAt, settings.durationSeconds]);
-
-  useEffect(() => {
-    if (remaining <= settings.warningSeconds && remaining > 0 && !warned.current) {
-      warned.current = true;
-      beep(540);
-    }
-    if (remaining === 0 && !ended.current) {
-      ended.current = true;
-      beep(320);
-    }
-  }, [remaining, settings.warningSeconds]);
-
-  const assignedQuestions = exam.scores
-    .map((score) => questionById.get(score.questionId))
-    .filter((question): question is Question => Boolean(question));
+  const questionId = currentQuestionId(exam);
+  const question = questionId ? questionById.get(questionId) : undefined;
+  const firstQuestion = exam.firstQuestionId ? questionById.get(exam.firstQuestionId) : undefined;
+  const redrawn = Boolean(exam.redrawQuestionId);
+  const options = outcomeOptions(exam.level, redrawn);
+  const timerStart = timerStartedAt(exam);
 
   function change(patch: Partial<Exam>) {
     onChange({ ...exam, ...patch, updatedAt: new Date().toISOString() });
   }
 
-  function mark(index: number, value: Exclude<Mark, null>) {
-    if (exam.scores[index].correct === value) return;
-    const scores = exam.scores.map((score, scoreIndex) =>
-      scoreIndex === index ? { ...score, correct: value } : score,
-    ) as Exam["scores"];
-    change({ scores });
+  function chooseOutcome(outcome: Outcome) {
+    if (exam.outcome === outcome) return;
+    change({ outcome, score: calculateScore(exam.level, redrawn, outcome) });
   }
 
-  function useHint(questionId: string) {
-    if (window.confirm("이 문항에 Hint를 사용하시겠습니까? 전체 평가에서 한 번만 사용할 수 있습니다.")) {
-      change(applyHint(exam, questionId, new Date().toISOString()));
+  function redraw() {
+    if (
+      window.confirm(
+        `같은 난이도에서 문제를 다시 뽑으시겠습니까?\n\n다시 뽑으면 해결 시 점수가 ${REDRAW_PENALTY}점 차감되고, 타이머가 새로 시작됩니다. 다시 뽑기는 한 번만 할 수 있습니다.`,
+      )
+    ) {
+      onRedraw();
     }
   }
 
   async function complete() {
-    if (!areScoresComplete(exam.scores, exam.fluency)) return;
+    if (!exam.outcome) return;
     await onSubmit({ ...exam, status: "COMPLETED" });
   }
-
-  const timerState = remaining === 0 ? "ended" : remaining <= settings.warningSeconds ? "warning" : "";
 
   return (
     <main className="shell exam-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">f(x)</div>
+          <div className="brand-mark">f′(x)</div>
           <div>
-            <h1>대수 수학개념 도슨트</h1>
+            <h1>미적분 수학개념 도슨트</h1>
             <p>평가 중에는 이 기기에만 저장되며, 평가 완료 시 Google Sheet에 한 번 저장됩니다.</p>
           </div>
         </div>
@@ -105,9 +89,12 @@ export function ExamView({
 
       <section className="card exam-header">
         <div>
-          <p>{exam.className} · {exam.number}번</p>
+          <p>{exam.className} · {exam.number}번 · {exam.round}차</p>
           <h2>{exam.name}</h2>
           <p>
+            {LEVEL_TITLES[exam.level]}
+            {redrawn ? " · 다시 뽑음" : ""}
+            {" · "}
             {exam.status === "COMPLETED"
               ? dirty
                 ? "완료 기록 수정 중 · 저장 전"
@@ -115,17 +102,16 @@ export function ExamView({
               : "평가 진행 중 · 로컬 초안 저장됨"}
           </p>
         </div>
-        <div className={`timer ${timerState}`} role="timer" aria-label="남은 평가 시간">
-          <strong>{formatTime(remaining)}</strong>
-          <span>{remaining === 0 ? "평가 시간 종료" : "남은 시간"}</span>
-        </div>
+        <ExamTimer
+          key={timerStart}
+          startedAt={timerStart}
+          durationSeconds={settings.durationSeconds}
+          warningSeconds={settings.warningSeconds}
+        />
       </section>
 
-      {error ? <div className="notice error">{error}</div> : null}
+      {error ? <div className="notice error" role="alert">{error}</div> : null}
       {busy ? <div className="notice info">최종 평가 결과를 Google Sheet에 저장하고 있습니다...</div> : null}
-      <div className="notice requirement-notice">
-        필수 입력: 문항별 정답 3개와 학생별 유창성 · Hint는 선택 사항
-      </div>
       {conflict ? (
         <section className="notice conflict-notice" role="alert">
           <div>
@@ -143,34 +129,73 @@ export function ExamView({
         </section>
       ) : null}
 
-      <section className="question-list">
-        {assignedQuestions.map((question, index) => (
-          <QuestionCard
-            key={question.id}
-            index={index}
-            question={question}
-            score={exam.scores[index]}
-            hintQuestionId={exam.hintQuestionId}
-            busy={busy}
-            onMark={mark}
-            onHint={useHint}
-          />
-        ))}
+      <section className="exam-main">
+        <article className="card question-card">
+          <p className="question-kicker">{redrawn ? "REDRAWN QUESTION" : "QUESTION"}</p>
+          {exam.level === "OWN" ? (
+            <>
+              <h3>자신이 준비한 문제</h3>
+              <p className="question-text">학생이 준비해 온 문제를 제한 시간 안에 풀고 풀이 과정을 설명합니다.</p>
+            </>
+          ) : question ? (
+            <>
+              <h3>{question.title}</h3>
+              <p className="question-text"><MathText>{question.prompt}</MathText></p>
+            </>
+          ) : (
+            <div className="notice error">배정된 문항을 찾을 수 없습니다. 문항목록 Sheet를 확인해 주세요.</div>
+          )}
+        </article>
+
+        <aside className="exam-side">
+          {exam.level !== "OWN" ? (
+            <section className="card side-panel">
+              <p className="question-kicker">REDRAW</p>
+              {redrawn ? (
+                <p className="side-text">
+                  다시 뽑기 사용 · 처음 문항: {firstQuestion?.title ?? exam.firstQuestionId}
+                </p>
+              ) : (
+                <p className="side-text">
+                  문제를 제대로 설명하지 못하면 같은 난이도에서 한 번 다시 뽑을 수 있습니다. (−{REDRAW_PENALTY}점)
+                </p>
+              )}
+              <button
+                className="button secondary wide redraw-button"
+                type="button"
+                disabled={busy || !canRedraw(exam, questions)}
+                onClick={redraw}
+              >
+                {redrawn ? "다시 뽑기 사용 완료" : "같은 난이도에서 다시 뽑기"}
+              </button>
+            </section>
+          ) : null}
+
+          <section className="card side-panel">
+            <p className="question-kicker" id="outcome-label">RESULT</p>
+            <div className="outcome-list" role="group" aria-labelledby="outcome-label">
+              {options.map((option) => (
+                <button
+                  className={`outcome-option ${exam.outcome === option.outcome ? "selected" : ""}`}
+                  key={option.outcome}
+                  type="button"
+                  disabled={busy}
+                  aria-pressed={exam.outcome === option.outcome}
+                  onClick={() => chooseOutcome(option.outcome)}
+                >
+                  <span>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </span>
+                  <em>{option.points}점</em>
+                </button>
+              ))}
+            </div>
+          </section>
+        </aside>
       </section>
 
       <section className="card exam-footer">
-        <div className="fluency-panel">
-          <p className="question-kicker">STUDENT FLUENCY</p>
-          <MarkButtons
-            label="학생별 유창성"
-            value={exam.fluency}
-            disabled={busy}
-            large
-            onChange={(fluency) => {
-              if (exam.fluency !== fluency) change({ fluency });
-            }}
-          />
-        </div>
         <div className="field memo-field">
           <label htmlFor="memo">교사 메모</label>
           <textarea
@@ -191,14 +216,55 @@ export function ExamView({
           <button
             className="button save-button"
             type="button"
-            disabled={busy || !dirty || Boolean(conflict) || !areScoresComplete(exam.scores, exam.fluency)}
+            disabled={busy || !dirty || Boolean(conflict) || !exam.outcome}
             onClick={complete}
           >
             {exam.status === "COMPLETED" ? "평가 결과 저장" : "평가 완료"}
+            {exam.score !== null && exam.outcome ? ` · ${exam.score}점` : ""}
           </button>
         </div>
       </section>
     </main>
+  );
+}
+
+function ExamTimer({
+  startedAt,
+  durationSeconds,
+  warningSeconds,
+}: {
+  startedAt: string;
+  durationSeconds: number;
+  warningSeconds: number;
+}) {
+  const [remaining, setRemaining] = useState(() => getRemaining(startedAt, durationSeconds));
+  const warned = useRef(false);
+  const ended = useRef(false);
+
+  useEffect(() => {
+    const update = () => setRemaining(getRemaining(startedAt, durationSeconds));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt, durationSeconds]);
+
+  useEffect(() => {
+    if (remaining <= warningSeconds && remaining > 0 && !warned.current) {
+      warned.current = true;
+      beep(540);
+    }
+    if (remaining === 0 && !ended.current) {
+      ended.current = true;
+      beep(320);
+    }
+  }, [remaining, warningSeconds]);
+
+  const timerState = remaining === 0 ? "ended" : remaining <= warningSeconds ? "warning" : "";
+  return (
+    <div className={`timer ${timerState}`} role="timer" aria-label="남은 평가 시간">
+      <strong>{formatTime(remaining)}</strong>
+      <span>{remaining === 0 ? "평가 시간 종료" : "남은 시간"}</span>
+    </div>
   );
 }
 
@@ -226,3 +292,4 @@ function beep(frequency: number) {
     // Visual timer state remains available when audio is blocked by the browser.
   }
 }
+

@@ -1,102 +1,113 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyHint,
-  areScoresComplete,
+  applyRedraw,
   buildClassProgress,
-  deriveStudentFluency,
-  isHintStateValid,
-  pickRandomQuestionIds,
+  canRedraw,
+  currentQuestionId,
+  examStructureError,
+  pickQuestionId,
+  questionIdsFor,
+  timerStartedAt,
 } from "./exam-rules";
-import type { Exam, Score, Student } from "./types";
+import type { Exam, Question, Student } from "./types";
 
-describe("pickRandomQuestionIds", () => {
-  it("서로 다른 문항 두 개를 고른다", () => {
-    const selected = pickRandomQuestionIds(["R1", "R2", "R3"], () => 0);
-    expect(selected).toEqual(["R1", "R2"]);
+const questions: Question[] = [
+  { id: "L1", round: 1, difficulty: "LOW", title: "", prompt: "" },
+  { id: "L2", round: 1, difficulty: "LOW", title: "", prompt: "" },
+  { id: "L3", round: 1, difficulty: "LOW", title: "", prompt: "" },
+  { id: "H1", round: 1, difficulty: "HIGH", title: "", prompt: "" },
+];
+
+const exam: Exam = {
+  examId: "exam-1",
+  round: 1,
+  studentId: "20101",
+  className: "2-1",
+  number: 1,
+  name: "학생",
+  level: "LOW",
+  firstQuestionId: "L2",
+  redrawQuestionId: null,
+  redrawAt: null,
+  startedAt: "2026-10-01T00:00:00.000Z",
+  endedAt: null,
+  outcome: null,
+  score: null,
+  memo: "",
+  status: "IN_PROGRESS",
+  updatedAt: "2026-10-01T00:00:00.000Z",
+  revision: 0,
+};
+
+describe("문항 추첨", () => {
+  it("선택한 난이도의 문항만 후보로 쓴다", () => {
+    expect(questionIdsFor(questions, "LOW")).toEqual(["L1", "L2", "L3"]);
+    expect(questionIdsFor(questions, "OWN")).toEqual([]);
   });
 
-  it("문항이 부족하면 실패한다", () => {
-    expect(() => pickRandomQuestionIds(["R1", "R1"])).toThrow();
+  it("이미 뽑은 문항은 제외하고 뽑는다", () => {
+    for (const value of [0, 0.5, 0.99]) {
+      expect(pickQuestionId(["L1", "L2", "L3"], ["L2"], () => value)).not.toBe("L2");
+    }
+    expect(() => pickQuestionId(["H1"], ["H1"])).toThrow();
   });
 });
 
-describe("areScoresComplete", () => {
-  it("Hint를 사용하지 않아도 문항별 정답 3개와 학생별 유창성만으로 완료된다", () => {
-    const scores: Score[] = [
-      { questionId: "S1", correct: "O" },
-      { questionId: "R1", correct: "X" },
-      { questionId: "R2", correct: "O" },
-    ];
-    expect(areScoresComplete(scores, "O")).toBe(true);
-    expect(areScoresComplete([{ ...scores[0], correct: null }, ...scores.slice(1)], "O")).toBe(false);
-    expect(areScoresComplete(scores, null)).toBe(false);
+describe("다시 뽑기", () => {
+  it("같은 난이도에서 처음 문항을 뺀 문항으로 한 번 다시 뽑고 타이머를 새로 시작한다", () => {
+    const redrawAt = "2026-10-01T00:02:00.000Z";
+    const redrawn = applyRedraw({ ...exam, outcome: "FAILED", score: 38 }, questions, redrawAt, () => 0);
+    expect(redrawn.redrawQuestionId).toBe("L1");
+    expect(currentQuestionId(redrawn)).toBe("L1");
+    expect(timerStartedAt(redrawn)).toBe(redrawAt);
+    expect(redrawn.outcome).toBeNull();
+    expect(canRedraw(redrawn, questions)).toBe(false);
+    expect(() => applyRedraw(redrawn, questions, redrawAt)).toThrow();
+  });
+
+  it("준비한 문제이거나 다른 문항이 없으면 다시 뽑을 수 없다", () => {
+    expect(canRedraw({ ...exam, level: "OWN", firstQuestionId: null }, questions)).toBe(false);
+    expect(canRedraw({ ...exam, level: "HIGH", firstQuestionId: "H1" }, questions)).toBe(false);
+    expect(canRedraw({ ...exam, status: "COMPLETED" }, questions)).toBe(false);
   });
 });
 
-describe("isHintStateValid", () => {
-  const assignedQuestionIds = ["S1", "R1", "R2"];
-
-  it("Hint 문항과 시각이 모두 비어 있으면 정상이다", () => {
-    expect(isHintStateValid(null, null, assignedQuestionIds)).toBe(true);
-  });
-
-  it("Hint를 사용했다면 배정 문항과 사용 시각이 모두 필요하다", () => {
+describe("examStructureError", () => {
+  it("정상 기록은 통과시킨다", () => {
+    expect(examStructureError({ ...exam, outcome: "SOLVED" }, questions)).toBeNull();
     expect(
-      isHintStateValid("R1", "2026-06-15T01:00:00.000Z", assignedQuestionIds),
-    ).toBe(true);
-    expect(isHintStateValid("R1", null, assignedQuestionIds)).toBe(false);
+      examStructureError(
+        { ...exam, redrawQuestionId: "L3", redrawAt: "2026-10-01T00:02:00.000Z", outcome: "SOLVED" },
+        questions,
+      ),
+    ).toBeNull();
     expect(
-      isHintStateValid(null, "2026-06-15T01:00:00.000Z", assignedQuestionIds),
-    ).toBe(false);
+      examStructureError({ ...exam, level: "OWN", firstQuestionId: null, outcome: "SOLVED" }, questions),
+    ).toBeNull();
+  });
+
+  it("결과 누락, 다른 난이도 문항, 같은 문항 재추첨을 거부한다", () => {
+    expect(examStructureError(exam, questions)).not.toBeNull();
+    expect(examStructureError({ ...exam, firstQuestionId: "H1", outcome: "SOLVED" }, questions)).not.toBeNull();
     expect(
-      isHintStateValid("R9", "2026-06-15T01:00:00.000Z", assignedQuestionIds),
-    ).toBe(false);
-  });
-});
-
-describe("deriveStudentFluency", () => {
-  it("기존 문항별 유창성이 모두 O일 때만 O로 옮긴다", () => {
-    expect(deriveStudentFluency(["O", "O", "O"])).toBe("O");
-    expect(deriveStudentFluency(["O", null, "O"])).toBeNull();
-  });
-
-  it("기존 값에 X가 하나라도 있으면 X로 옮기고 전부 비면 비워 둔다", () => {
-    expect(deriveStudentFluency(["O", "X", null])).toBe("X");
-    expect(deriveStudentFluency([null, null, null])).toBeNull();
-  });
-});
-
-describe("applyHint", () => {
-  const exam = {
-    scores: [
-      { questionId: "S1", correct: null },
-      { questionId: "R1", correct: null },
-      { questionId: "R2", correct: null },
-    ],
-    hintQuestionId: null,
-    hintAt: null,
-  } as Exam;
-
-  it("배정 문항에 Hint 1회를 기록한다", () => {
-    const result = applyHint(exam, "R1", "2026-06-11T00:00:00.000Z");
-    expect(result.hintQuestionId).toBe("R1");
-    expect(result.hintAt).toBe("2026-06-11T00:00:00.000Z");
-  });
-
-  it("다른 문항에 두 번째 Hint를 쓰지 못한다", () => {
-    const used = applyHint(exam, "R1", "2026-06-11T00:00:00.000Z");
-    expect(() => applyHint(used, "R2", "2026-06-11T00:01:00.000Z")).toThrow(
-      "Hint는 전체 평가에서 한 번만 사용할 수 있습니다.",
-    );
+      examStructureError(
+        { ...exam, redrawQuestionId: "L2", redrawAt: "2026-10-01T00:02:00.000Z", outcome: "SOLVED" },
+        questions,
+      ),
+    ).not.toBeNull();
+    expect(
+      examStructureError({ ...exam, redrawQuestionId: "L3", redrawAt: null, outcome: "SOLVED" }, questions),
+    ).not.toBeNull();
   });
 });
 
 describe("buildClassProgress", () => {
-  it("반별 완료 및 진행 중 인원을 계산한다", () => {
+  it("활성 학생만 반별 완료 및 진행 중 인원에 센다", () => {
     const students = [
       { studentId: "20101", className: "2-1", number: 1, name: "가", active: true },
       { studentId: "20102", className: "2-1", number: 2, name: "나", active: true },
+      { studentId: "20103", className: "2-1", number: 3, name: "다", active: false },
     ] satisfies Student[];
     const exams = [
       { studentId: "20101", status: "COMPLETED" },
@@ -108,3 +119,4 @@ describe("buildClassProgress", () => {
     ]);
   });
 });
+

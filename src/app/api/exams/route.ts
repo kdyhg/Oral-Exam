@@ -2,29 +2,29 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { apiError, requireAuthentication } from "@/lib/api";
+import { isOpenRound } from "@/lib/rounds";
 import { ExamConflictError, submitExam } from "@/lib/sheets";
 import type { ExamSubmission } from "@/lib/types";
 
-const markSchema = z.union([z.literal("O"), z.literal("X"), z.null()]);
+const nullableText = z.string().min(1).max(200).nullable();
 const examSchema = z.object({
-  examId: z.string().min(1),
-  studentId: z.string().min(1),
-  className: z.string(),
+  examId: z.string().min(1).max(100),
+  round: z.number().int().refine(isOpenRound, "열려 있지 않은 차수입니다."),
+  studentId: z.string().min(1).max(20),
+  className: z.string().max(20),
   number: z.number(),
-  name: z.string(),
-  selfQuestionId: z.string().min(1),
-  randomQuestionIds: z.tuple([z.string().min(1), z.string().min(1)]),
-  startedAt: z.string().min(1),
-  endedAt: z.string().nullable(),
-  hintQuestionId: z.string().nullable(),
-  hintAt: z.string().nullable(),
-  scores: z
-    .array(z.object({ questionId: z.string().min(1), correct: markSchema }))
-    .length(3),
-  fluency: markSchema,
+  name: z.string().max(50),
+  level: z.enum(["HIGH", "MID", "LOW", "OWN"]),
+  firstQuestionId: nullableText,
+  redrawQuestionId: nullableText,
+  redrawAt: nullableText,
+  startedAt: z.string().min(1).max(40),
+  endedAt: z.string().max(40).nullable(),
+  outcome: z.enum(["SOLVED", "FAILED", "NO_ATTEMPT"]),
+  score: z.number().nullable(),
   memo: z.string().max(1000),
-  status: z.union([z.literal("IN_PROGRESS"), z.literal("COMPLETED")]),
-  updatedAt: z.string(),
+  status: z.enum(["IN_PROGRESS", "COMPLETED"]),
+  updatedAt: z.string().max(40),
   revision: z.number().int().nonnegative(),
 });
 const schema = z.object({
@@ -58,3 +58,4 @@ export async function POST(request: Request): Promise<NextResponse> {
     return apiError(error);
   }
 }
+

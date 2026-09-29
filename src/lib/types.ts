@@ -1,5 +1,8 @@
-export type QuestionType = "SELF" | "RANDOM";
-export type Mark = "O" | "X" | null;
+import type { Round } from "./rounds";
+
+export type Difficulty = "HIGH" | "MID" | "LOW";
+export type ExamLevel = Difficulty | "OWN";
+export type Outcome = "SOLVED" | "FAILED" | "NO_ATTEMPT";
 export type ExamStatus = "IN_PROGRESS" | "COMPLETED";
 
 export interface Student {
@@ -12,30 +15,27 @@ export interface Student {
 
 export interface Question {
   id: string;
-  type: QuestionType;
+  round: Round;
+  difficulty: Difficulty;
   title: string;
   prompt: string;
 }
 
-export interface Score {
-  questionId: string;
-  correct: Mark;
-}
-
 export interface Exam {
   examId: string;
+  round: Round;
   studentId: string;
   className: string;
   number: number;
   name: string;
-  selfQuestionId: string;
-  randomQuestionIds: [string, string];
+  level: ExamLevel;
+  firstQuestionId: string | null;
+  redrawQuestionId: string | null;
+  redrawAt: string | null;
   startedAt: string;
   endedAt: string | null;
-  hintQuestionId: string | null;
-  hintAt: string | null;
-  scores: [Score, Score, Score];
-  fluency: Mark;
+  outcome: Outcome | null;
+  score: number | null;
   memo: string;
   status: ExamStatus;
   updatedAt: string;
@@ -78,6 +78,7 @@ export interface ClassProgress {
 }
 
 export interface BootstrapData {
+  round: Round;
   students: Student[];
   questions: Question[];
   exams: Exam[];
@@ -85,3 +86,4 @@ export interface BootstrapData {
   settings: AppSettings;
   progress: ClassProgress[];
 }
+

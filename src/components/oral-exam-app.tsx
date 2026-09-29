@@ -4,43 +4,54 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Dashboard } from "@/components/dashboard";
 import { ExamView } from "@/components/exam-view";
+import { LevelChooser } from "@/components/level-chooser";
 import { LoginView } from "@/components/login-view";
-import { QuestionChooser } from "@/components/question-chooser";
+import { RoundSelectView } from "@/components/round-select-view";
 import { ScoreResultView } from "@/components/score-result-view";
 import {
-  DRAFT_STORAGE_KEY,
-  LEGACY_DRAFT_STORAGE_KEY,
+  draftStorageKey,
   isDraftStale,
   mergeExams,
   parseDrafts,
   pruneExpiredDrafts,
   type ExamDrafts,
 } from "@/lib/drafts";
-import { buildClassProgress, pickRandomQuestionIds } from "@/lib/exam-rules";
+import {
+  applyRedraw,
+  buildClassProgress,
+  pickQuestionId,
+  questionIdsFor,
+} from "@/lib/exam-rules";
+import { isOpenRound, roundLabel, type Round } from "@/lib/rounds";
 import type {
   BootstrapData,
   Exam,
   ExamConflict,
   ExamDraft,
+  ExamLevel,
   ExamResetResult,
   Student,
 } from "@/lib/types";
 
+const ROUND_STORAGE_KEY = "docent-selected-round";
+
 export function OralExamApp() {
+  const [round, setRound] = useState<Round | null>(readSelectedRound);
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [data, setData] = useState<BootstrapData | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [selectedClass, setSelectedClass] = useState("2-1");
   const [scoreResultExam, setScoreResultExam] = useState<Exam | null>(null);
-  const [drafts, setDrafts] = useState<ExamDrafts>(readBrowserDrafts);
+  const [drafts, setDrafts] = useState<ExamDrafts>(() => readBrowserDrafts(readSelectedRound()));
   const [conflict, setConflict] = useState<ExamConflict | null>(null);
   const [resettingStudentId, setResettingStudentId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!round) return;
     let active = true;
-    void fetchBootstrap()
+    void fetchBootstrap(round)
       .then((payload) => {
         if (!active) return;
         setData(payload);
@@ -54,20 +65,21 @@ export function OralExamApp() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [round]);
 
   useEffect(() => {
+    if (!round) return;
     try {
-      window.localStorage.removeItem(LEGACY_DRAFT_STORAGE_KEY);
+      const key = draftStorageKey(round);
       if (Object.keys(drafts).length) {
-        window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+        window.localStorage.setItem(key, JSON.stringify(drafts));
       } else {
-        window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+        window.localStorage.removeItem(key);
       }
     } catch {
       // The active assessment still works when browser storage is unavailable.
     }
-  }, [drafts]);
+  }, [drafts, round]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -77,10 +89,10 @@ export function OralExamApp() {
   }, []);
 
   useEffect(() => {
-    if (!authenticated || selectedStudent) return;
+    if (!round || !authenticated || selectedStudent) return;
     let active = true;
     const refresh = () => {
-      void fetchBootstrap()
+      void fetchBootstrap(round)
         .then((payload) => {
           if (active && payload) setData(payload);
         })
@@ -98,7 +110,7 @@ export function OralExamApp() {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [authenticated, selectedStudent]);
+  }, [round, authenticated, selectedStudent]);
 
   const visibleData = useMemo(() => {
     if (!data) return null;
@@ -106,12 +118,41 @@ export function OralExamApp() {
     return { ...data, exams, progress: buildClassProgress(data.students, exams) };
   }, [data, drafts]);
 
+  function enterRound(next: Round) {
+    try {
+      window.sessionStorage.setItem(ROUND_STORAGE_KEY, String(next));
+    } catch {
+      // Round selection still works for this page view.
+    }
+    setError("");
+    setAuthenticated(null);
+    setData(null);
+    setDrafts(readBrowserDrafts(next));
+    setRound(next);
+  }
+
+  function leaveRound() {
+    try {
+      window.sessionStorage.removeItem(ROUND_STORAGE_KEY);
+    } catch {
+      // Nothing to clean up when session storage is unavailable.
+    }
+    setRound(null);
+    setAuthenticated(null);
+    setData(null);
+    setSelectedStudent(null);
+    setScoreResultExam(null);
+    setConflict(null);
+    setError("");
+  }
+
   async function login(pin: string) {
+    if (!round) return;
     setBusy(true);
     setError("");
     try {
       await request("/api/auth/login", { method: "POST", body: JSON.stringify({ pin }) });
-      const payload = await fetchBootstrap();
+      const payload = await fetchBootstrap(round);
       setData(payload);
       setAuthenticated(Boolean(payload));
     } catch (loginError) {
@@ -138,31 +179,32 @@ export function OralExamApp() {
     setSelectedStudent(student);
   }
 
-  function startExam(selfQuestionId: string) {
+  function startExam(level: ExamLevel) {
     if (!selectedStudent || !data) return;
-    const randomQuestionIds = pickRandomQuestionIds(
-      data.questions.filter((question) => question.type === "RANDOM").map((question) => question.id),
-    );
+    let firstQuestionId: string | null = null;
+    try {
+      firstQuestionId = level === "OWN" ? null : pickQuestionId(questionIdsFor(data.questions, level));
+    } catch (pickError) {
+      setError(message(pickError));
+      return;
+    }
     const now = new Date().toISOString();
     const currentRevision = data.recordRevisions[selectedStudent.studentId] ?? 0;
     const exam: Exam = {
       examId: crypto.randomUUID(),
+      round: data.round,
       studentId: selectedStudent.studentId,
       className: selectedStudent.className,
       number: selectedStudent.number,
       name: selectedStudent.name,
-      selfQuestionId,
-      randomQuestionIds,
+      level,
+      firstQuestionId,
+      redrawQuestionId: null,
+      redrawAt: null,
       startedAt: now,
       endedAt: null,
-      hintQuestionId: null,
-      hintAt: null,
-      scores: [
-        { questionId: selfQuestionId, correct: null },
-        { questionId: randomQuestionIds[0], correct: null },
-        { questionId: randomQuestionIds[1], correct: null },
-      ],
-      fluency: null,
+      outcome: null,
+      score: null,
       memo: "",
       status: "IN_PROGRESS",
       updatedAt: now,
@@ -188,6 +230,17 @@ export function OralExamApp() {
       },
     }));
     setConflict(null);
+  }
+
+  function redrawQuestion(exam: Exam) {
+    if (!data) return;
+    try {
+      const now = new Date().toISOString();
+      updateDraft({ ...applyRedraw(exam, data.questions, now), updatedAt: now });
+      setError("");
+    } catch (redrawError) {
+      setError(message(redrawError));
+    }
   }
 
   async function submitDraft(exam: Exam, forceOverwrite = false) {
@@ -265,9 +318,7 @@ export function OralExamApp() {
                 item.studentId === latestExam.studentId ? latestExam : item,
               )
             : [...current.exams, latestExam]
-          : current.exams.filter(
-              (item) => item.studentId !== selectedStudent.studentId,
-            );
+          : current.exams.filter((item) => item.studentId !== selectedStudent.studentId);
         return {
           ...current,
           exams,
@@ -303,13 +354,14 @@ export function OralExamApp() {
   }
 
   async function resetStudentRecord(student: Student) {
+    if (!round) return;
     const saved = data?.exams.find(
       (exam) => exam.studentId === student.studentId && exam.status === "COMPLETED",
     );
     if (!saved) return;
     if (
       !window.confirm(
-        `${student.className} ${student.number}번 ${student.name} 학생의 완료 기록을 초기화하시겠습니까?\n\n학생은 미평가 상태로 돌아가며, 기존 결과는 평가이력에 보존됩니다.`,
+        `${student.className} ${student.number}번 ${student.name} 학생의 ${roundLabel(round)} 완료 기록을 초기화하시겠습니까?\n\n학생은 미평가 상태로 돌아가며, 기존 결과는 평가이력에 보존됩니다.`,
       )
     ) {
       return;
@@ -323,6 +375,7 @@ export function OralExamApp() {
         {
           method: "DELETE",
           body: JSON.stringify({
+            round,
             baseRevision: data?.recordRevisions[student.studentId] ?? saved.revision,
           }),
         },
@@ -343,7 +396,7 @@ export function OralExamApp() {
       removeDraft(result.studentId);
     } catch (resetError) {
       if (resetError instanceof ApiRequestError && resetError.code === "VERSION_CONFLICT") {
-        const payload = await fetchBootstrap();
+        const payload = await fetchBootstrap(round);
         if (payload) setData(payload);
       }
       setError(message(resetError));
@@ -370,8 +423,19 @@ export function OralExamApp() {
       : undefined;
   }
 
+  if (!round) return <RoundSelectView onEnter={enterRound} />;
   if (authenticated === null) return <main className="loading">평가 데이터를 확인하고 있습니다...</main>;
-  if (!authenticated || !visibleData) return <LoginView busy={busy} error={error} onLogin={login} />;
+  if (!authenticated || !visibleData) {
+    return (
+      <LoginView
+        roundLabel={roundLabel(round)}
+        busy={busy}
+        error={error}
+        onLogin={login}
+        onBack={leaveRound}
+      />
+    );
+  }
 
   if (scoreResultExam) {
     return <ScoreResultView exam={scoreResultExam} onHome={goHomeFromScore} />;
@@ -410,8 +474,9 @@ export function OralExamApp() {
           setSelectedStudent(null);
         }}
         onChange={updateDraft}
+        onRedraw={() => redrawQuestion(exam)}
         onDiscard={draft ? discardActiveDraft : undefined}
-        onSubmit={submitDraft}
+        onSubmit={(next) => submitDraft(next)}
         onUseLatest={() =>
           acceptLatestRecord(
             visibleConflict?.latestExam ?? null,
@@ -424,10 +489,10 @@ export function OralExamApp() {
   }
   if (selectedStudent) {
     return (
-      <QuestionChooser
+      <LevelChooser
         student={selectedStudent}
-        questions={visibleData.questions.filter((question) => question.type === "SELF")}
-        busy={false}
+        questions={visibleData.questions}
+        durationSeconds={visibleData.settings.durationSeconds}
         onBack={() => setSelectedStudent(null)}
         onChoose={startExam}
       />
@@ -436,6 +501,7 @@ export function OralExamApp() {
   return (
     <Dashboard
       data={visibleData}
+      roundLabel={roundLabel(round)}
       draftCount={Object.keys(drafts).length}
       error={error}
       selectedClass={selectedClass}
@@ -444,6 +510,7 @@ export function OralExamApp() {
       onSelectClass={setSelectedClass}
       onResetStudent={resetStudentRecord}
       onSelectStudent={selectStudent}
+      onChangeRound={leaveRound}
       onLogout={logout}
     />
   );
@@ -477,8 +544,8 @@ async function request<T = unknown>(url: string, init: RequestInit): Promise<T> 
   return payload;
 }
 
-async function fetchBootstrap(): Promise<BootstrapData | null> {
-  const response = await fetch("/api/bootstrap", { cache: "no-store" });
+async function fetchBootstrap(round: Round): Promise<BootstrapData | null> {
+  const response = await fetch(`/api/bootstrap?round=${round}`, { cache: "no-store" });
   if (response.status === 401) return null;
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error ?? "데이터를 불러오지 못했습니다.");
@@ -489,14 +556,22 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다.";
 }
 
-function readBrowserDrafts(): ExamDrafts {
-  if (typeof window === "undefined") return {};
+function readSelectedRound(): Round | null {
+  if (typeof window === "undefined") return null;
   try {
-    return parseDrafts(
-      window.localStorage.getItem(DRAFT_STORAGE_KEY) ??
-        window.localStorage.getItem(LEGACY_DRAFT_STORAGE_KEY),
-    );
+    const value = Number(window.sessionStorage.getItem(ROUND_STORAGE_KEY));
+    return isOpenRound(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readBrowserDrafts(round: Round | null): ExamDrafts {
+  if (typeof window === "undefined" || !round) return {};
+  try {
+    return parseDrafts(window.localStorage.getItem(draftStorageKey(round)), round);
   } catch {
     return {};
   }
 }
+
